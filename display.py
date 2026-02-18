@@ -24,6 +24,14 @@ class ChannelControl(QtWidgets.QWidget):
         self._lock_enabled = False          # "arming" state (button)
         self._global_deviation_mode = False # global deviation mode state
 
+        # Guard: after the user clicks "Set Freq" or "Set V", ignore
+        # incoming overwrites for a short window so the pull-based
+        # refresh doesn't clobber the text box before the worker
+        # has confirmed the new value.
+        self._setpoint_pending_until = 0.0
+        self._voltage_pending_until = 0.0
+        self._PENDING_GUARD_S = 1.0        # seconds to suppress overwrites
+
         # Plot buffers
         self._t0 = time.perf_counter()
         self.t = deque(maxlen=100)
@@ -170,7 +178,7 @@ class ChannelControl(QtWidgets.QWidget):
             else:
                 ftxt = f"{float(f_disp):.6f}"
 
-        self.status_label.setText(f"<b>{self.name}: {ftxt} THz — {tag}</b>")
+        self.status_label.setText(f"<b>{self.name}: {ftxt} THz â€” {tag}</b>")
 
     def update_slow(self, status: dict):
         """
@@ -184,7 +192,7 @@ class ChannelControl(QtWidgets.QWidget):
             self.line_tol_up.setPos(sp + LOCK_TOL)
             self.line_tol_dn.setPos(sp - LOCK_TOL)
 
-            if not self.input_set.hasFocus():
+            if not self.input_set.hasFocus() and time.perf_counter() > self._setpoint_pending_until:
                 self.input_set.setText(f"{sp:.6f}")
 
         if "bound_min" in status or "bound_max" in status:
@@ -217,6 +225,7 @@ class ChannelControl(QtWidgets.QWidget):
     def _on_setpoint(self):
         try:
             val = float(self.input_set.text())
+            self._setpoint_pending_until = time.perf_counter() + self._PENDING_GUARD_S
             self.request_setpoint.emit(self.port, val)
         except Exception:
             pass
@@ -224,6 +233,7 @@ class ChannelControl(QtWidgets.QWidget):
     def _on_voltage(self):
         try:
             val = float(self.input_volt.text())
+            self._voltage_pending_until = time.perf_counter() + self._PENDING_GUARD_S
             self.request_voltage.emit(self.port, val)
         except Exception:
             pass

@@ -8,9 +8,9 @@ import wlmConst
 
 PORTS = list(range(1, 9))
 
-# Match gui_v10 cadence
-INTERVAL_POLL_FAST_MS = 100    # measurements
-INTERVAL_POLL_SLOW_MS = 1000   # status + globals + bounds
+# Worker poll rates (write to SharedState only — GUI pulls separately)
+INTERVAL_POLL_FAST_MS = 20     # Measurements: matches WLM switcher cycle (~20-50ms)
+INTERVAL_POLL_SLOW_MS = 1000   # Status/globals: setpoints, bounds, T, P (slow-changing)
 
 # ZMQ
 ZMQ_REQ_PORT = 3796
@@ -55,7 +55,7 @@ class SharedExperimentState:
                 "setpoint": 0.0,
                 "bound_min": 0.0,
                 "bound_max": 0.0,
-                "lock_enabled": False,  # software “armed” state (not lock_status)
+                "lock_enabled": False,  # software â€œarmedâ€ state (not lock_status)
             }
             for p in PORTS
         }
@@ -93,22 +93,39 @@ class SharedExperimentState:
         with QMutexLocker(self._mutex):
             return self._status[port].copy()
 
+    def get_all_status(self) -> dict:
+        with QMutexLocker(self._mutex):
+            return {p: d.copy() for p, d in self._status.items()}
+
     def get_globals(self) -> dict:
         with QMutexLocker(self._mutex):
             return self._globals.copy()
+
+    def get_gui_snapshot(self) -> dict:
+        """
+        Atomic read of everything the GUI needs, in one mutex acquisition.
+        Returns independent copies — safe to use from the GUI thread
+        while the worker thread continues writing.
+        """
+        with QMutexLocker(self._mutex):
+            return {
+                "measurements": {p: d.copy() for p, d in self._measurements.items()},
+                "status": {p: d.copy() for p, d in self._status.items()},
+                "globals": self._globals.copy(),
+            }
 
 
 class WavemeterWorker(QObject):
     """
     Owns ALL wavemeter I/O (QObject moved to a QThread).
     """
-    # Measurements: usually emitted as {port: full_measurement_dict} for all ports
-    measurement_updated = pyqtSignal(dict)
+    # Measurements: no longer pushed to GUI. GUI pulls from SharedExperimentState.
+    # (This eliminates signal queue backlog that caused the freeze.)
 
-    # Status deltas: (port, delta_dict). Slow poll emits full status per port.
+    # Status deltas: (port, delta_dict). Only emitted by write handlers for immediate feedback.
     status_updated = pyqtSignal(int, dict)
 
-    # Globals: emitted as full globals dict (slow poll) or delta (write handler)
+    # Globals: only emitted by write handlers for immediate feedback.
     globals_updated = pyqtSignal(dict)
 
     # Logging: only meaningful events
@@ -116,7 +133,7 @@ class WavemeterWorker(QObject):
 
     finished = pyqtSignal()
 
-    # “Hard invalid” codes (errors)
+    # â€œHard invalidâ€ codes (errors)
     HARD_INVALID = {
         wlmConst.ErrNoValue,
         wlmConst.ErrNoSignal,
@@ -137,10 +154,11 @@ class WavemeterWorker(QObject):
         self.wlm = wlm_link
         self.state = shared_state
 
-        # Internal state (no mutex)
+        # Internal state (only accessed from worker thread — no mutex needed)
         self._running = False
+        self._busy_fast = False   # re-entrancy guard for _poll_fast
         self._last_good_freq = {p: None for p in PORTS}
-        self._lock_enabled = {p: False for p in PORTS}   # “armed” state only
+        self._lock_enabled = {p: False for p in PORTS}   # â€œarmedâ€ state only
 
         self._timer_fast = None
         self._timer_slow = None
@@ -209,7 +227,8 @@ class WavemeterWorker(QObject):
 
     def _emit_full_status_for_port(self, port: int):
         """
-        Full status snapshot (slow poll only): use/show, setpoint, bounds, plus lock_enabled.
+        Read status from WLM and write to SharedState.
+        No signal emitted — GUI pulls on its own timer.
         """
         use_val, show_val = self.wlm.get_switcher_signal(port)
         sp = self.wlm.get_pid_course_num(port)
@@ -225,7 +244,6 @@ class WavemeterWorker(QObject):
         }
 
         self.state.update_status(port, s_full)
-        self.status_updated.emit(port, s_full)
 
     # --------------------------
     # Poll loops
@@ -234,36 +252,42 @@ class WavemeterWorker(QObject):
         if not self._running:
             return
 
-        out = {}
+        # Re-entrancy guard: if the previous poll is still running
+        # (e.g. DLL stall on startup), skip this tick rather than
+        # piling up back-to-back polls.
+        if self._busy_fast:
+            return
+        self._busy_fast = True
+        try:
+            for port in PORTS:
+                f_raw = self.wlm.get_frequency_num(port)
+                freq_raw, freq_disp, freq_plot, valid = self._normalize_frequency(port, f_raw)
 
-        for port in PORTS:
-            f_raw = self.wlm.get_frequency_num(port)
-            freq_raw, freq_disp, freq_plot, valid = self._normalize_frequency(port, f_raw)
+                volt = float(self.wlm.get_deviation_signal(port))
+                exp = self.wlm.get_exposure_num(port)
+                amp = self.wlm.get_amplitude(port)
 
-            volt = float(self.wlm.get_deviation_signal(port))
-            exp = self.wlm.get_exposure_num(port)
-            amp = self.wlm.get_amplitude(port)
+                pkt = {
+                    "freq_raw": freq_raw,
+                    "freq_display": freq_disp,
+                    "freq_plot": freq_plot,
+                    "valid": bool(valid),
+                    "volt": volt,
+                    "exp": tuple(exp),
+                    "amp": tuple(amp),
+                }
 
-            pkt = {
-                "freq_raw": freq_raw,
-                "freq_display": freq_disp,
-                "freq_plot": freq_plot,
-                "valid": bool(valid),
-                "volt": volt,
-                "exp": tuple(exp),
-                "amp": tuple(amp),
-            }
-
-            self.state.update_measurement(port, pkt)
-            out[port] = pkt
-
-        self.measurement_updated.emit(out)
+                self.state.update_measurement(port, pkt)
+        except Exception as e:
+            self.log_message.emit(f"poll_fast error: {e}")
+        finally:
+            self._busy_fast = False
 
     def _poll_slow(self):
         if not self._running:
             return
 
-        # Globals (full snapshot)
+        # Globals
         try:
             g = {
                 "temperature": float(self.wlm.get_temperature()),
@@ -272,16 +296,16 @@ class WavemeterWorker(QObject):
                 "deviation_mode": (self.wlm.get_deviation_mode() == 1),
             }
             self.state.update_globals(g)
-            self.globals_updated.emit(g)
-        except Exception:
-            pass
+            # No signal — GUI pulls on its own timer
+        except Exception as e:
+            self.log_message.emit(f"poll_slow globals error: {e}")
 
-        # Full status snapshot for all 8 ports
+        # Status for all 8 ports
         for port in PORTS:
             try:
                 self._emit_full_status_for_port(port)
-            except Exception:
-                pass
+            except Exception as e:
+                self.log_message.emit(f"poll_slow status ch{port} error: {e}")
 
     # --------------------------
     # Write handlers (write + targeted readback + delta emit)
@@ -290,29 +314,25 @@ class WavemeterWorker(QObject):
     def handle_setpoint_write(self, port: int, value: float):
         self.wlm.set_pid_course_num(port, value)
 
-        # targeted readback: setpoint only
         try:
             sp = self.wlm.get_pid_course_num(port)
             self.log_message.emit(f"Setpoint write ch{port}: {sp:.7f}")
             delta = {"setpoint": float(sp)}
             self.state.update_status(port, delta)
             self.status_updated.emit(port, delta)
-        except Exception:
-            pass
+        except Exception as e:
+            self.log_message.emit(f"Setpoint readback ch{port} failed: {e}")
 
     @pyqtSlot(int, float)
     def handle_voltage_write(self, port: int, value: float):
         self.wlm.set_deviation_signal(port, value)
 
-        # targeted readback: voltage only (measurement delta)
         try:
             v = float(self.wlm.get_deviation_signal(port))
             self.log_message.emit(f"Voltage write ch{port}: {v}")
-            delta = {"volt": v}
-            self.state.update_measurement(port, delta)
-            self.measurement_updated.emit({port: delta})
-        except Exception:
-            pass
+            self.state.update_measurement(port, {"volt": v})
+        except Exception as e:
+            self.log_message.emit(f"Voltage readback ch{port} failed: {e}")
 
     @pyqtSlot(int, bool, bool)
     def handle_switcher_write(self, port: int, use: bool, show: bool):
@@ -325,12 +345,12 @@ class WavemeterWorker(QObject):
             delta = {"use": bool(u), "show": bool(s)}
             self.state.update_status(port, delta)
             self.status_updated.emit(port, delta)
-        except Exception:
-            pass
+        except Exception as e:
+            self.log_message.emit(f"Switcher readback ch{port} failed: {e}")
 
     @pyqtSlot(int, bool)
     def handle_lock_toggle(self, port: int, enabled: bool):
-        # This is the “arming” state, not lock_status.
+        # This is the â€œarmingâ€ state, not lock_status.
         self.wlm.set_channel_assignment(port, enabled)
         self._lock_enabled[port] = bool(enabled)
 
@@ -352,8 +372,8 @@ class WavemeterWorker(QObject):
             delta = {"autocal": bool(ac)}
             self.state.update_globals(delta)
             self.globals_updated.emit(delta)
-        except Exception:
-            pass
+        except Exception as e:
+            self.log_message.emit(f"Autocal readback failed: {e}")
 
     @pyqtSlot(bool)
     def handle_deviation_toggle(self, enable: bool):
@@ -366,8 +386,8 @@ class WavemeterWorker(QObject):
             delta = {"deviation_mode": bool(dm)}
             self.state.update_globals(delta)
             self.globals_updated.emit(delta)
-        except Exception:
-            pass
+        except Exception as e:
+            self.log_message.emit(f"Deviation mode readback failed: {e}")
 
 
 class ZMQPubWorker(QThread):
