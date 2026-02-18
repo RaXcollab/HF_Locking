@@ -9,8 +9,8 @@ import wlmConst
 PORTS = list(range(1, 9))
 
 # Match gui_v10 cadence
-INTERVAL_POLL_FAST_MS = 50    # measurements
-INTERVAL_POLL_SLOW_MS = 500   # status + globals + bounds
+INTERVAL_POLL_FAST_MS = 100    # measurements
+INTERVAL_POLL_SLOW_MS = 1000   # status + globals + bounds
 
 # ZMQ
 ZMQ_REQ_PORT = 3796
