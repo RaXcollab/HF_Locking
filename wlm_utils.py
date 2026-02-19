@@ -206,6 +206,15 @@ class wlm_link():
     
 
     #Assign and unassign channels
+    def get_channel_assignment(self, port: int):
+        """Returns True if deviation channel `port` is assigned (locked), False otherwise."""
+        intval = ctypes.c_long(0)
+        doubleval = ctypes.c_double(0)
+        wlmData.dll.GetPIDSetting(wlmConst.cmiDeviationChannel, ctypes.c_long(port),
+                                  ctypes.byref(intval), ctypes.byref(doubleval))
+        # intval == port means assigned; 0 means disabled
+        return intval.value == port
+
     def set_channel_assignment(self, port: int, enable):
         """port is wavemeter port 1-8
         enable is True or False

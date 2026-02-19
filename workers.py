@@ -8,7 +8,7 @@ import wlmConst
 
 PORTS = list(range(1, 9))
 
-# Worker poll rates (write to SharedState only â€” GUI pulls separately)
+# Worker poll rates (write to SharedState only Ã¢â‚¬â€ GUI pulls separately)
 INTERVAL_POLL_FAST_MS = 20     # Measurements: matches WLM switcher cycle (~20-50ms)
 INTERVAL_POLL_SLOW_MS = 1000   # Status/globals: setpoints, bounds, T, P (slow-changing)
 
@@ -18,6 +18,7 @@ ZMQ_PUB_PORT = 3797
 PUB_PERIOD_S = 0.1            # 10 Hz
 LOCK_TOLERANCE = 0.000005     # THz
 LOCK_TIMEOUT_S = 60.0
+MIN_VALID_SETPOINT_THZ = 1.0  # reject bogus setpoints (e.g. 0 from remote init)
 
 # If you haven't removed the print() inside wlm_utils.get_pid_course_num(),
 # enabling this will avoid console spam without touching wlm_utils.py.
@@ -55,7 +56,7 @@ class SharedExperimentState:
                 "setpoint": 0.0,
                 "bound_min": 0.0,
                 "bound_max": 0.0,
-                "lock_enabled": False,  # software Ã¢â‚¬Å“armedÃ¢â‚¬Â state (not lock_status)
+                "lock_enabled": False,  # software ÃƒÂ¢Ã¢â€šÂ¬Ã…â€œarmedÃƒÂ¢Ã¢â€šÂ¬Ã‚Â state (not lock_status)
             }
             for p in PORTS
         }
@@ -105,7 +106,7 @@ class SharedExperimentState:
     def get_gui_snapshot(self) -> dict:
         """
         Atomic read of everything the GUI needs, in one mutex acquisition.
-        Returns independent copies â€” safe to use from the GUI thread
+        Returns independent copies Ã¢â‚¬â€ safe to use from the GUI thread
         while the worker thread continues writing.
         """
         with QMutexLocker(self._mutex):
@@ -134,7 +135,7 @@ class WavemeterWorker(QObject):
 
     finished = pyqtSignal()
 
-    # Ã¢â‚¬Å“Hard invalidÃ¢â‚¬Â codes (errors)
+    # ÃƒÂ¢Ã¢â€šÂ¬Ã…â€œHard invalidÃƒÂ¢Ã¢â€šÂ¬Ã‚Â codes (errors)
     HARD_INVALID = {
         wlmConst.ErrNoValue,
         wlmConst.ErrNoSignal,
@@ -155,11 +156,11 @@ class WavemeterWorker(QObject):
         self.wlm = wlm_link
         self.state = shared_state
 
-        # Internal state (only accessed from worker thread â€” no mutex needed)
+        # Internal state (only accessed from worker thread Ã¢â‚¬â€ no mutex needed)
         self._running = False
         self._busy_fast = False   # re-entrancy guard for _poll_fast
         self._last_good_freq = {p: None for p in PORTS}
-        self._lock_enabled = {p: False for p in PORTS}   # Ã¢â‚¬Å“armedÃ¢â‚¬Â state only
+        self._lock_enabled = {p: False for p in PORTS}   # ÃƒÂ¢Ã¢â€šÂ¬Ã…â€œarmedÃƒÂ¢Ã¢â€šÂ¬Ã‚Â state only
 
         self._timer_fast = None
         self._timer_slow = None
@@ -230,11 +231,15 @@ class WavemeterWorker(QObject):
     def _emit_full_status_for_port(self, port: int):
         """
         Read status from WLM and write to SharedState.
-        No signal emitted â€” GUI pulls on its own timer.
+        No signal emitted Ã¢â‚¬â€ GUI pulls on its own timer.
         """
         use_val, show_val = self.wlm.get_switcher_signal(port)
         sp = self.wlm.get_pid_course_num(port)
         bmin, bmax = self.wlm.get_deviation_bounds(port)
+
+        # Read actual lock (deviation channel assignment) from WLM hardware
+        lock_hw = self.wlm.get_channel_assignment(port)
+        self._lock_enabled[port] = lock_hw
 
         s_full = {
             "use": bool(use_val),
@@ -242,7 +247,7 @@ class WavemeterWorker(QObject):
             "setpoint": float(sp),
             "bound_min": float(bmin),
             "bound_max": float(bmax),
-            "lock_enabled": bool(self._lock_enabled[port]),
+            "lock_enabled": bool(lock_hw),
         }
 
         self.state.update_status(port, s_full)
@@ -318,7 +323,7 @@ class WavemeterWorker(QObject):
                 "wlm_active": True,
             }
             self.state.update_globals(g)
-            # No signal â€” GUI pulls on its own timer
+            # No signal Ã¢â‚¬â€ GUI pulls on its own timer
         except Exception as e:
             self.log_message.emit(f"poll_slow globals error: {e}")
 
@@ -334,6 +339,14 @@ class WavemeterWorker(QObject):
     # --------------------------
     @pyqtSlot(int, float)
     def handle_setpoint_write(self, port: int, value: float):
+        # Reject bogus setpoints (e.g. 0 sent by remote clients on first connect)
+        if value < MIN_VALID_SETPOINT_THZ:
+            self.log_message.emit(
+                f"Setpoint write ch{port} REJECTED: {value} THz is below "
+                f"minimum ({MIN_VALID_SETPOINT_THZ} THz)"
+            )
+            return
+
         self.wlm.set_pid_course_num(port, value)
 
         try:
@@ -372,7 +385,7 @@ class WavemeterWorker(QObject):
 
     @pyqtSlot(int, bool)
     def handle_lock_toggle(self, port: int, enabled: bool):
-        # This is the Ã¢â‚¬Å“armingÃ¢â‚¬Â state, not lock_status.
+        # This is the ÃƒÂ¢Ã¢â€šÂ¬Ã…â€œarmingÃƒÂ¢Ã¢â€šÂ¬Ã‚Â state, not lock_status.
         self.wlm.set_channel_assignment(port, enabled)
         self._lock_enabled[port] = bool(enabled)
 
