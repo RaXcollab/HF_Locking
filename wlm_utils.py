@@ -87,7 +87,8 @@ class wlm_link():
             StatusString = 'High Signal'
         else:
             StatusString = 'WLM is running'
-        print("status: "+StatusString) # TODO: consider passing back the status
+        if self.verbose:
+            print("status: "+StatusString) # TODO: consider passing back the status
         return Frequency
 
 
@@ -110,13 +111,22 @@ class wlm_link():
             print("Port %i status: "%port + StatusString) # TODO: consider passing back the status
         return Frequency
     
+    def is_active(self):
+        """Return True if at least one wlmServer instance is running."""
+        try:
+            return wlmData.dll.GetWLMCount(0) > 0
+        except Exception:
+            return False
+
     def get_exposure_num(self, port):
         Exposure_1 = wlmData.dll.GetExposureNum(int(port),1, 0)
         Exposure_2 = wlmData.dll.GetExposureNum(int(port),2, 0)
         if Exposure_1 == wlmConst.ErrWlmMissing:
-            print("Exposure: WLM not active")
+            if self.verbose:
+                print("Exposure: WLM not active")
         elif Exposure_1 == wlmConst.ErrNotAvailable:
-            print("Exposure: not available")
+            if self.verbose:
+                print("Exposure: not available")
         else:
             if self.verbose:
                 print("Exposure: %d ms" % Exposure_1)

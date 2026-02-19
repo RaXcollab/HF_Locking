@@ -60,83 +60,49 @@ class ChannelControl(QtWidgets.QWidget):
 
     def _build_ui(self):
         layout = QtWidgets.QVBoxLayout(self)
-        layout.setContentsMargins(4, 2, 4, 2)
-        layout.setSpacing(2)
 
-        # â”€â”€ Row 1: name/freq/status | Use | Show | [Enable Lock] â”€â”€
-        row1 = QtWidgets.QHBoxLayout()
-        row1.setSpacing(4)
+        # Header row
+        header = QtWidgets.QHBoxLayout()
         self.status_label = QtWidgets.QLabel(f"<b>{self.name} (Ch {self.port})</b>")
+        self.lock_btn = QtWidgets.QPushButton("Enable Lock")
+        self.lock_btn.setCheckable(True)
+        self.lock_btn.clicked.connect(self._on_lock_toggled)
+        header.addWidget(self.status_label)
+        header.addWidget(self.lock_btn)
+        layout.addLayout(header)
+
+        # Controls row
+        controls = QtWidgets.QHBoxLayout()
         self.chk_use = QtWidgets.QCheckBox("Use")
         self.chk_show = QtWidgets.QCheckBox("Show")
         self.chk_use.clicked.connect(self._on_switcher)
         self.chk_show.clicked.connect(self._on_switcher)
-        self.lock_btn = QtWidgets.QPushButton("Enable Lock")
-        self.lock_btn.setCheckable(True)
-        self.lock_btn.setFixedHeight(24)
-        self.lock_btn.setMinimumWidth(130)
-        self.lock_btn.clicked.connect(self._on_lock_toggled)
-
-        row1.addWidget(self.status_label, 1)
-        row1.addWidget(self.chk_use)
-        row1.addWidget(self.chk_show)
-        row1.addWidget(self.lock_btn)
-        layout.addLayout(row1)
-
-        # â”€â”€ Row 2: [setpoint] Set Freq | [mV] Set V | Exp | CCD bar â”€â”€
-        row2 = QtWidgets.QHBoxLayout()
-        row2.setSpacing(3)
 
         self.input_set = QtWidgets.QLineEdit()
         self.input_set.setPlaceholderText("Setpoint (THz)")
-        self.input_set.setFixedHeight(22)
-        self.input_set.setFixedWidth(100)
+        self.input_set.setMinimumWidth(120)
         self.btn_set = QtWidgets.QPushButton("Set Freq")
-        self.btn_set.setFixedHeight(22)
         self.btn_set.clicked.connect(self._on_setpoint)
 
         self.input_volt = QtWidgets.QLineEdit()
-        self.input_volt.setPlaceholderText("mV")
-        self.input_volt.setFixedHeight(22)
-        self.input_volt.setFixedWidth(55)
+        self.input_volt.setPlaceholderText("Voltage (mV)")
+        self.input_volt.setMinimumWidth(90)
         self.btn_volt = QtWidgets.QPushButton("Set V")
-        self.btn_volt.setFixedHeight(22)
         self.btn_volt.clicked.connect(self._on_voltage)
 
-        self.lbl_exp = QtWidgets.QLabel("Exp: N/A")
-        self.lbl_exp.setFixedHeight(22)
+        controls.addWidget(self.chk_use)
+        controls.addWidget(self.chk_show)
+        controls.addWidget(self.input_set)
+        controls.addWidget(self.btn_set)
+        controls.addWidget(self.input_volt)
+        controls.addWidget(self.btn_volt)
+        layout.addLayout(controls)
 
-        # CCD bars (compact)
-        self.bar_amp1 = QtWidgets.QProgressBar()
-        self.bar_amp1.setRange(0, 5000)
-        self.bar_amp1.setTextVisible(False)
-        self.bar_amp1.setFixedHeight(12)
-        self.bar_amp1.setMaximumWidth(50)
-        self.bar_amp2 = QtWidgets.QProgressBar()
-        self.bar_amp2.setRange(0, 5000)
-        self.bar_amp2.setTextVisible(False)
-        self.bar_amp2.setFixedHeight(12)
-        self.bar_amp2.setMaximumWidth(50)
-
-        row2.addWidget(self.input_set)
-        row2.addWidget(self.btn_set)
-        row2.addWidget(self.input_volt)
-        row2.addWidget(self.btn_volt)
-        row2.addStretch(1)
-        row2.addWidget(self.lbl_exp)
-        row2.addWidget(QtWidgets.QLabel("CCD:"))
-        row2.addWidget(self.bar_amp1)
-        row2.addWidget(self.bar_amp2)
-        layout.addLayout(row2)
-
-        # â”€â”€ Plots (take all remaining vertical space) â”€â”€
         # Frequency plot (with stable elapsed-time x-axis)
         self.plot_freq = pg.PlotWidget(
-            title="Frequency (THz)",
+            title=f"Ch {self.port} Frequency (THz)",
             axisItems={"bottom": ElapsedAxisItem(orientation="bottom")},
         )
-        self.plot_freq.setMinimumHeight(90)
-        self.plot_freq.getPlotItem().titleLabel.setMaximumHeight(16)
         self.curve_freq = self.plot_freq.plot()
         self.line_setpoint = pg.InfiniteLine(angle=0, movable=False, pen=pg.mkPen('g', style=QtCore.Qt.DashLine))
         self.line_tol_up = pg.InfiniteLine(angle=0, movable=False, pen=pg.mkPen('r', style=QtCore.Qt.DashLine))
@@ -147,20 +113,36 @@ class ChannelControl(QtWidgets.QWidget):
 
         # Voltage plot (with stable elapsed-time x-axis; Y autoscaled to data)
         self.plot_volt = pg.PlotWidget(
-            title="Deviation (mV)",
+            title=f"Ch {self.port} Deviation Signal (mV)",
             axisItems={"bottom": ElapsedAxisItem(orientation="bottom")},
         )
-        self.plot_volt.setMinimumHeight(90)
-        self.plot_volt.getPlotItem().titleLabel.setMaximumHeight(16)
-        self.plot_volt.enableAutoRange(axis="y", enable=False)
+        self.plot_volt.enableAutoRange(axis="y", enable=False)  # we'll set Y range manually
         self.curve_volt = self.plot_volt.plot()
         self.line_bound_min = pg.InfiniteLine(angle=0, movable=False, pen=pg.mkPen('r', style=QtCore.Qt.DashLine))
         self.line_bound_max = pg.InfiniteLine(angle=0, movable=False, pen=pg.mkPen('r', style=QtCore.Qt.DashLine))
         self.plot_volt.addItem(self.line_bound_min)
         self.plot_volt.addItem(self.line_bound_max)
 
-        layout.addWidget(self.plot_freq, 1)
-        layout.addWidget(self.plot_volt, 1)
+        layout.addWidget(self.plot_freq)
+        layout.addWidget(self.plot_volt)
+
+        # Exposure + power bars
+        self.lbl_exp = QtWidgets.QLabel("Exposure: N/A")
+        layout.addWidget(self.lbl_exp)
+
+        pwr = QtWidgets.QHBoxLayout()
+        self.bar_amp1 = QtWidgets.QProgressBar()
+        self.bar_amp1.setRange(0, 5000)
+        self.bar_amp1.setTextVisible(False)
+        self.bar_amp2 = QtWidgets.QProgressBar()
+        self.bar_amp2.setRange(0, 5000)
+        self.bar_amp2.setTextVisible(False)
+
+        pwr.addWidget(QtWidgets.QLabel("CCD1:"))
+        pwr.addWidget(self.bar_amp1)
+        pwr.addWidget(QtWidgets.QLabel("CCD2:"))
+        pwr.addWidget(self.bar_amp2)
+        layout.addLayout(pwr)
 
     # ----- controller-fed state -----
     def set_globals(self, g: dict):
@@ -213,7 +195,7 @@ class ChannelControl(QtWidgets.QWidget):
                 self.plot_volt.setYRange(vmin - pad, vmax + pad, padding=0)
 
         e1, e2 = meas.get("exp", (0.0, 0.0))
-        self.lbl_exp.setText(f"Exp: {float(e1):.0f}+{float(e2):.0f} ms")
+        self.lbl_exp.setText(f"Exposure: {float(e1):.1f} ms + {float(e2):.1f} ms")
 
         a1, a2 = meas.get("amp", (0.0, 0.0))
         self.bar_amp1.setValue(int(a1))
@@ -238,7 +220,7 @@ class ChannelControl(QtWidgets.QWidget):
             else:
                 ftxt = f"{float(f_disp):.6f}"
 
-        self.status_label.setText(f"<b>{self.name}: {ftxt} THz \u2014 {tag}</b>")
+        self.status_label.setText(f"<b>{self.name}: {ftxt} THz â€” {tag}</b>")
 
     def update_slow(self, status: dict):
         """
@@ -312,7 +294,6 @@ class GlobalControl(QtWidgets.QWidget):
     def __init__(self):
         super().__init__()
         layout = QtWidgets.QHBoxLayout(self)
-        layout.setContentsMargins(4, 2, 4, 2)
 
         self.lbl_wlm = QtWidgets.QLabel("")
         self.lbl_temp = QtWidgets.QLabel("T: N/A")
@@ -320,18 +301,15 @@ class GlobalControl(QtWidgets.QWidget):
 
         self.btn_auto = QtWidgets.QPushButton("Autocal OFF")
         self.btn_auto.setCheckable(True)
-        self.btn_auto.setMinimumWidth(120)
         self.btn_auto.clicked.connect(lambda: self.request_autocal.emit(self.btn_auto.isChecked()))
 
         self.btn_dev = QtWidgets.QPushButton("Deviation OFF")
         self.btn_dev.setCheckable(True)
-        self.btn_dev.setMinimumWidth(120)
         self.btn_dev.clicked.connect(lambda: self.request_deviation.emit(self.btn_dev.isChecked()))
 
         layout.addWidget(self.lbl_wlm)
         layout.addWidget(self.lbl_temp)
         layout.addWidget(self.lbl_press)
-        layout.addStretch(1)
         layout.addWidget(self.btn_auto)
         layout.addWidget(self.btn_dev)
 

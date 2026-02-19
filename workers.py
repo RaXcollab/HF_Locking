@@ -8,7 +8,7 @@ import wlmConst
 
 PORTS = list(range(1, 9))
 
-# Worker poll rates (write to SharedState only — GUI pulls separately)
+# Worker poll rates (write to SharedState only â€” GUI pulls separately)
 INTERVAL_POLL_FAST_MS = 20     # Measurements: matches WLM switcher cycle (~20-50ms)
 INTERVAL_POLL_SLOW_MS = 1000   # Status/globals: setpoints, bounds, T, P (slow-changing)
 
@@ -55,7 +55,7 @@ class SharedExperimentState:
                 "setpoint": 0.0,
                 "bound_min": 0.0,
                 "bound_max": 0.0,
-                "lock_enabled": False,  # software â€œarmedâ€ state (not lock_status)
+                "lock_enabled": False,  # software Ã¢â‚¬Å“armedÃ¢â‚¬Â state (not lock_status)
             }
             for p in PORTS
         }
@@ -65,6 +65,7 @@ class SharedExperimentState:
             "pressure": 0.0,
             "autocal": False,
             "deviation_mode": False,
+            "wlm_active": True,
         }
 
     # ---- writers ----
@@ -104,7 +105,7 @@ class SharedExperimentState:
     def get_gui_snapshot(self) -> dict:
         """
         Atomic read of everything the GUI needs, in one mutex acquisition.
-        Returns independent copies — safe to use from the GUI thread
+        Returns independent copies â€” safe to use from the GUI thread
         while the worker thread continues writing.
         """
         with QMutexLocker(self._mutex):
@@ -133,7 +134,7 @@ class WavemeterWorker(QObject):
 
     finished = pyqtSignal()
 
-    # â€œHard invalidâ€ codes (errors)
+    # Ã¢â‚¬Å“Hard invalidÃ¢â‚¬Â codes (errors)
     HARD_INVALID = {
         wlmConst.ErrNoValue,
         wlmConst.ErrNoSignal,
@@ -154,14 +155,15 @@ class WavemeterWorker(QObject):
         self.wlm = wlm_link
         self.state = shared_state
 
-        # Internal state (only accessed from worker thread — no mutex needed)
+        # Internal state (only accessed from worker thread â€” no mutex needed)
         self._running = False
         self._busy_fast = False   # re-entrancy guard for _poll_fast
         self._last_good_freq = {p: None for p in PORTS}
-        self._lock_enabled = {p: False for p in PORTS}   # â€œarmedâ€ state only
+        self._lock_enabled = {p: False for p in PORTS}   # Ã¢â‚¬Å“armedÃ¢â‚¬Â state only
 
         self._timer_fast = None
         self._timer_slow = None
+        self._wlm_active = True  # assume active; _poll_slow will verify
 
     @pyqtSlot()
     def start_polling(self):
@@ -228,7 +230,7 @@ class WavemeterWorker(QObject):
     def _emit_full_status_for_port(self, port: int):
         """
         Read status from WLM and write to SharedState.
-        No signal emitted — GUI pulls on its own timer.
+        No signal emitted â€” GUI pulls on its own timer.
         """
         use_val, show_val = self.wlm.get_switcher_signal(port)
         sp = self.wlm.get_pid_course_num(port)
@@ -250,6 +252,8 @@ class WavemeterWorker(QObject):
     # --------------------------
     def _poll_fast(self):
         if not self._running:
+            return
+        if not self._wlm_active:
             return
 
         # Re-entrancy guard: if the previous poll is still running
@@ -287,6 +291,23 @@ class WavemeterWorker(QObject):
         if not self._running:
             return
 
+        # Check WLM availability; back off gracefully when offline
+        was_active = self._wlm_active
+        try:
+            self._wlm_active = self.wlm.is_active()
+        except Exception:
+            self._wlm_active = False
+
+        if not self._wlm_active:
+            if was_active:
+                self.log_message.emit("WLM server not detected \u2013 waiting for it to start\u2026")
+            self.state.update_globals({"wlm_active": False})
+            return
+
+        if not was_active:
+            self.log_message.emit("WLM server detected \u2013 resuming polling.")
+            self.state.update_globals({"wlm_active": True})
+
         # Globals
         try:
             g = {
@@ -294,9 +315,10 @@ class WavemeterWorker(QObject):
                 "pressure": float(self.wlm.get_pressure()),
                 "autocal": (self.wlm.get_autocal_mode() == 1),
                 "deviation_mode": (self.wlm.get_deviation_mode() == 1),
+                "wlm_active": True,
             }
             self.state.update_globals(g)
-            # No signal — GUI pulls on its own timer
+            # No signal â€” GUI pulls on its own timer
         except Exception as e:
             self.log_message.emit(f"poll_slow globals error: {e}")
 
@@ -350,7 +372,7 @@ class WavemeterWorker(QObject):
 
     @pyqtSlot(int, bool)
     def handle_lock_toggle(self, port: int, enabled: bool):
-        # This is the â€œarmingâ€ state, not lock_status.
+        # This is the Ã¢â‚¬Å“armingÃ¢â‚¬Â state, not lock_status.
         self.wlm.set_channel_assignment(port, enabled)
         self._lock_enabled[port] = bool(enabled)
 
