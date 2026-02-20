@@ -541,13 +541,18 @@ class ZMQRepWorker(QThread):
             target = float(d["value"])
 
             self.request_setpoint_write.emit(p, target)
-            # wait for lock if enabled
+
+            # Let the client opt in/out of lock-wait; default to instance setting.
+            # Manual-mode clients send wait_for_lock=False for immediate return.
+            # Buffered-shot clients send wait_for_lock=True to block until converged.
+            wait = d.get("wait_for_lock", self.wait_for_lock)
+
             st = self.state.get_status(p)
             gl = self.state.get_globals()
             lock_enabled = bool(st.get("lock_enabled", False))
             dev_mode = bool(gl.get("deviation_mode", False))
 
-            if self.wait_for_lock and lock_enabled and dev_mode:
+            if wait and lock_enabled and dev_mode:
                 self.log_message.emit(f"ZMQ: waiting for lock ch{p} target={target}")
                 ok = self._wait_for_lock(p, target)
                 return json.dumps({"status": "SUCCESS" if ok else "ERROR",
