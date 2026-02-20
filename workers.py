@@ -8,7 +8,7 @@ import wlmConst
 
 PORTS = list(range(1, 9))
 
-# Worker poll rates (write to SharedState only Ã¢â‚¬â€ GUI pulls separately)
+# Worker poll rates (write to SharedState only, GUI pulls separately)
 INTERVAL_POLL_FAST_MS = 20     # Measurements: matches WLM switcher cycle (~20-50ms)
 INTERVAL_POLL_SLOW_MS = 1000   # Status/globals: setpoints, bounds, T, P (slow-changing)
 

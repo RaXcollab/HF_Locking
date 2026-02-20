@@ -5,6 +5,16 @@ import wlm_utils
 import workers
 import display
 
+# Set process priority to HIGH to minimize latency jitter (optional, but can help with responsiveness).
+import ctypes
+ctypes.windll.kernel32.SetPriorityClass(
+    ctypes.windll.kernel32.GetCurrentProcess(),
+    0x00000080  # HIGH_PRIORITY_CLASS
+)
+# ABOVE_NORMAL_PRIORITY_CLASS = 0x00008000
+# HIGH_PRIORITY_CLASS = 0x00000080
+# REALTIME_PRIORITY_CLASS = 0x00000100  # Will freeze system, use with caution~
+
 CHANNEL_NAMES = {
     1: "Ch_1", 
     2: "Ch_2", 
@@ -18,9 +28,9 @@ CHANNEL_NAMES = {
 
 PORTS = range(1, 9)
 
-# GUI refresh rates — decoupled from worker poll rates.
-GUI_FAST_MS = 50    # measurements, plots (10 Hz — matches human perception)
-GUI_SLOW_MS = 1000   # status, globals (1 Hz — setpoints/bounds/T/P rarely change)
+# GUI refresh rates decoupled from worker poll rates.
+GUI_FAST_MS = 30    # measurements, plots
+GUI_SLOW_MS = 500   # status, globals (setpoints/bounds/T/P rarely change)
 
 class ExperimentController(QtWidgets.QMainWindow):
     def __init__(self):
@@ -68,7 +78,7 @@ class ExperimentController(QtWidgets.QMainWindow):
             widget.request_lock.connect(self.worker_wlm.handle_lock_toggle, QtCore.Qt.QueuedConnection)
             widget.request_switcher.connect(self.worker_wlm.handle_switcher_write, QtCore.Qt.QueuedConnection)
 
-            # 4 rows × 2 columns: port 1-2 in row 0, 3-4 in row 1, etc.
+            # 4 rows Ã— 2 columns: port 1-2 in row 0, 3-4 in row 1, etc.
             self.grid.addWidget(widget, (port - 1) // 2, (port - 1) % 2)
 
         self.global_ctrl = display.GlobalControl()
@@ -111,14 +121,14 @@ class ExperimentController(QtWidgets.QMainWindow):
         self.zmq_rep.start()
 
     def _refresh_gui_fast(self):
-        """Pull measurements at 10 Hz — plots, frequency readouts, exposure, amplitude."""
+        """Pull measurements at 10 Hz â€” plots, frequency readouts, exposure, amplitude."""
         meas = self.shared.get_all_measurements()
         for port, m in meas.items():
             if port in self.channels:
                 self.channels[port].update_fast(m)
 
     def _refresh_gui_slow(self):
-        """Pull status + globals at 1 Hz — setpoints, bounds, switcher, lock, T, P."""
+        """Pull status + globals at 1 Hz â€” setpoints, bounds, switcher, lock, T, P."""
         status = self.shared.get_all_status()
         for port, s in status.items():
             if port in self.channels:
@@ -151,8 +161,9 @@ class ExperimentController(QtWidgets.QMainWindow):
             self._initial_position_done = True
             screen = QtWidgets.QApplication.primaryScreen().availableGeometry()
             frame = self.frameGeometry().height() - self.geometry().height()
+            half_w = screen.width() // 2
             self.move(screen.x(), screen.y())
-            self.resize(screen.width() // 2, screen.height() - frame)
+            self.resize(half_w, screen.height() - frame)
 
     def closeEvent(self, event):
         # Stop GUI refresh
