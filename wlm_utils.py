@@ -13,6 +13,7 @@ class wlm_link():
         #########################################################
         DLL_PATH = "wlmData.dll"
         self.verbose = False
+        self._course_buf = (ctypes.c_char * 1024)()  # reusable buffer for GetPIDCourseNum
         # Load DLL from DLL_PATH
         try:
             wlmData.LoadDLL(DLL_PATH)
@@ -207,11 +208,11 @@ class wlm_link():
         """Retrieves the setpoint wavelength for a given port.
         On 14-03-2025 suddenly the wavemeter started sending '= xxx.xxxx' format, so added a strip function here to remove that.
         """
-        string = (ctypes.c_char * 1024)()  # Create a buffer to hold the response
-        wlmData.dll.GetPIDCourseNum(port, ctypes.cast(string, ctypes.POINTER(ctypes.c_char)))
-        
+        ctypes.memset(self._course_buf, 0, 1024)
+        wlmData.dll.GetPIDCourseNum(port, ctypes.cast(self._course_buf, ctypes.POINTER(ctypes.c_char)))
+
         # Decode and clean the response string
-        response = string.value.decode().strip()  # Decode the byte string and strip whitespace
+        response = self._course_buf.value.decode().strip()
 
         # Check if response contains '=' and extract the value correctly
         if '=' in response:

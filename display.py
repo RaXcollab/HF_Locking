@@ -4,7 +4,7 @@ import pyqtgraph as pg
 from collections import deque
 import math
 import time
-import numpy as np
+import numpy as np  # kept for display_wide compatibility; not used in hot paths
 
 LOCK_TOL = 0.000005  # THz
 
@@ -106,6 +106,17 @@ class ChannelControl(QtWidgets.QWidget):
         self.f = deque(maxlen=100)     # stores MHz offset from _freq_ref
         self.v = deque(maxlen=100)
 
+        # Widget update caches — avoid redundant setText/setValue calls
+        self._last_exp_text = ""
+        self._last_status_text = ""
+        self._last_amp1 = -1
+        self._last_amp2 = -1
+        self._last_freq_title = ""
+
+        # Autoscale range caches — avoid redundant setYRange/setTickSpacing calls
+        self._prev_freq_yrange = (None, None, None)
+        self._prev_volt_yrange = (None, None)
+
         self._build_ui()
 
     def _build_ui(self):
@@ -137,6 +148,12 @@ class ChannelControl(QtWidgets.QWidget):
         self.chk_show = QtWidgets.QCheckBox("Show")
         self.chk_use.clicked.connect(self._on_switcher)
         self.chk_show.clicked.connect(self._on_switcher)
+
+        # Toggle: auto-Y-range for frequency plot
+        self.chk_auto_y = QtWidgets.QCheckBox("Auto Y")
+        self.chk_auto_y.setChecked(True)
+        self.chk_auto_y.setToolTip("Auto-scale frequency plot Y-axis to data range")
+        self.chk_auto_y.toggled.connect(self._on_auto_y_toggled)
 
         # Toggle: include setpoint line in freq-plot Y autoscale
         self.chk_incl_sp = QtWidgets.QCheckBox("Incl SP")
@@ -176,6 +193,7 @@ class ChannelControl(QtWidgets.QWidget):
 
         row2.addWidget(self.chk_use)
         row2.addWidget(self.chk_show)
+        row2.addWidget(self.chk_auto_y)
         row2.addWidget(self.chk_incl_sp)
         row2.addWidget(self.input_set)
         row2.addWidget(self.btn_set)
@@ -228,6 +246,15 @@ class ChannelControl(QtWidgets.QWidget):
         """Convert an absolute THz frequency to MHz offset from _freq_ref."""
         return (freq_thz - self._freq_ref) * 1.0e6
 
+    def _on_auto_y_toggled(self, checked):
+        """Enable/disable frequency plot Y-axis autoranging."""
+        self.chk_incl_sp.setEnabled(checked)
+        if not checked:
+            # Allow manual zoom/pan via mouse
+            self.plot_freq.enableAutoRange(axis="y", enable=False)
+            self._prev_freq_yrange = (None, None, None)
+        # When re-enabled, next update_fast() will recompute and snap to range
+
     def _update_freq_ref(self, setpoint_thz):
         """
         Recompute the plot reference.
@@ -247,11 +274,14 @@ class ChannelControl(QtWidgets.QWidget):
             self.f.clear()
             self.v.clear()
 
-        # Update title
+        # Update title (guarded)
         if self._use_exact_ref:
-            self.plot_freq.setTitle(f"Freq offset from SP {self._freq_ref:.6f} THz (MHz)")
+            title = f"Freq offset from SP {self._freq_ref:.6f} THz (MHz)"
         else:
-            self.plot_freq.setTitle(f"Freq offset from {self._freq_ref:.3f} THz (MHz)")
+            title = f"Freq offset from {self._freq_ref:.3f} THz (MHz)"
+        if title != self._last_freq_title:
+            self._last_freq_title = title
+            self.plot_freq.setTitle(title)
 
     # ----- controller-fed state -----
     def set_globals(self, g: dict):
@@ -279,7 +309,7 @@ class ChannelControl(QtWidgets.QWidget):
         if (not valid) or (f_plot is None):
             fplot_mhz = float("nan")
         else:
-            fplot_mhz = self._thz_to_mhz_offset(float(f_plot))
+            fplot_mhz = (float(f_plot) - self._freq_ref) * 1.0e6
 
         self.t.append(now)
         self.f.append(fplot_mhz)
@@ -288,28 +318,38 @@ class ChannelControl(QtWidgets.QWidget):
         self.curve_freq.setData(list(self.t), list(self.f))
         self.curve_volt.setData(list(self.t), list(self.v))
 
-        # --- Autoscale frequency offset Y-axis ---
-        if len(self.f) > 0:
-            farr = np.array(self.f)
-            finite = farr[np.isfinite(farr)]
-            if len(finite) > 0:
-                fmin, fmax = float(finite.min()), float(finite.max())
-
-                # Optionally include setpoint position in the range
+        # --- Autoscale frequency offset Y-axis (when enabled) ---
+        if self.chk_auto_y.isChecked() and len(self.f) > 0:
+            fmin = math.inf
+            fmax = -math.inf
+            for val in self.f:
+                if math.isfinite(val):
+                    if val < fmin:
+                        fmin = val
+                    if val > fmax:
+                        fmax = val
+            if fmin <= fmax:  # at least one finite value
                 if self.chk_incl_sp.isChecked():
                     fmin = min(fmin, self._sp_mhz)
                     fmax = max(fmax, self._sp_mhz)
 
                 ylo, yhi, step = _nice_y_range(fmin, fmax, min_span=FREQ_MIN_RANGE)
-                self.plot_freq.setYRange(ylo, yhi, padding=0)
-                self.plot_freq.getAxis("left").setTickSpacing(step, step / 5.0)
+                if (ylo, yhi, step) != self._prev_freq_yrange:
+                    self._prev_freq_yrange = (ylo, yhi, step)
+                    self.plot_freq.setYRange(ylo, yhi, padding=0)
+                    self.plot_freq.getAxis("left").setTickSpacing(step, step / 5.0)
 
         # --- Autoscale voltage Y-axis ---
         if len(self.v) > 0:
-            varr = np.array(self.v)
-            finite = varr[np.isfinite(varr)]
-            if len(finite) > 0:
-                vmin, vmax = float(finite.min()), float(finite.max())
+            vmin = math.inf
+            vmax = -math.inf
+            for val in self.v:
+                if math.isfinite(val):
+                    if val < vmin:
+                        vmin = val
+                    if val > vmax:
+                        vmax = val
+            if vmin <= vmax:  # at least one finite value
                 span = vmax - vmin
                 if span < VOLT_MIN_RANGE:
                     mid = (vmin + vmax) / 2.0
@@ -317,14 +357,28 @@ class ChannelControl(QtWidgets.QWidget):
                     vmax = mid + VOLT_MIN_RANGE / 2.0
                     span = VOLT_MIN_RANGE
                 pad = span * VOLT_PAD_FRAC
-                self.plot_volt.setYRange(vmin - pad, vmax + pad, padding=0)
+                new_vrange = (vmin - pad, vmax + pad)
+                if new_vrange != self._prev_volt_yrange:
+                    self._prev_volt_yrange = new_vrange
+                    self.plot_volt.setYRange(new_vrange[0], new_vrange[1], padding=0)
 
+        # --- Exposure label (guarded) ---
         e1, e2 = meas.get("exp", (0.0, 0.0))
-        self.lbl_exp.setText(f"Exp: {float(e1):.0f}+{float(e2):.0f} ms")
+        exp_text = f"Exp: {float(e1):.0f}+{float(e2):.0f} ms"
+        if exp_text != self._last_exp_text:
+            self._last_exp_text = exp_text
+            self.lbl_exp.setText(exp_text)
 
+        # --- Amplitude bars (guarded) ---
         a1, a2 = meas.get("amp", (0.0, 0.0))
-        self.bar_amp1.setValue(int(a1))
-        self.bar_amp2.setValue(int(a2))
+        ia1 = int(a1)
+        ia2 = int(a2)
+        if ia1 != self._last_amp1:
+            self._last_amp1 = ia1
+            self.bar_amp1.setValue(ia1)
+        if ia2 != self._last_amp2:
+            self._last_amp2 = ia2
+            self.bar_amp2.setValue(ia2)
 
         # Derived lock_status (arming state + global deviation mode + within tolerance)
         if valid and (f_disp is not None):
@@ -333,7 +387,7 @@ class ChannelControl(QtWidgets.QWidget):
         else:
             locked = False
 
-        # Status text
+        # Status text (guarded)
         if not valid:
             tag = "<span style='color:#7f8c8d'>NO SIGNAL</span>"
             ftxt = "N/A"
@@ -344,7 +398,10 @@ class ChannelControl(QtWidgets.QWidget):
             else:
                 ftxt = f"{float(f_disp):.6f}"
 
-        self.status_label.setText(f"<b>{self.name}: {ftxt} THz \u2014 {tag}</b>")
+        status_text = f"<b>{self.name}: {ftxt} THz \u2014 {tag}</b>"
+        if status_text != self._last_status_text:
+            self._last_status_text = status_text
+            self.status_label.setText(status_text)
 
     def update_slow(self, status: dict):
         """

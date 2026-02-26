@@ -479,19 +479,17 @@ class ZMQPubWorker(QThread):
         # give subscribers a moment (similar spirit to v10)
         time.sleep(0.1)
 
-        last = 0.0
         while self._running and not self.isInterruptionRequested():
-            now = time.time()
-            if now - last >= self.pub_period_s:
-                pub.send_string("heartbeat")
-                all_meas = self.state.get_all_measurements()
-                for port in PORTS:
-                    m = all_meas.get(port, {})
-                    f = m.get("freq_display", None)
-                    pub.send_string(f"{port} {0.0 if f is None else f}")
-                last = now
+            pub.send_string("heartbeat")
+            all_meas = self.state.get_all_measurements()
+            for port in PORTS:
+                m = all_meas.get(port, {})
+                f = m.get("freq_display", None)
+                pub.send_string(f"{port} {0.0 if f is None else f}")
 
-            time.sleep(0.01)  # light idle
+            time.sleep(self.pub_period_s)
+            if not self._running:
+                break
 
         try:
             pub.close()
@@ -530,7 +528,7 @@ class ZMQRepWorker(QThread):
         poller.register(rep, zmq.POLLIN)
 
         while self._running and not self.isInterruptionRequested():
-            socks = dict(poller.poll(250))  # lets us exit cleanly
+            socks = dict(poller.poll(50))  # lets us exit cleanly
             if rep not in socks:
                 continue
 
@@ -603,13 +601,13 @@ class ZMQRepWorker(QThread):
             # Require a new sample: skip -7
             if not valid or f_raw == wlmConst.InfNothingChanged:
                 consecutive = 0
-                time.sleep(0.1)
+                time.sleep(0.025)
                 continue
 
             f = meas.get("freq_display", None)
             if f is None:
                 consecutive = 0
-                time.sleep(0.1)
+                time.sleep(0.025)
                 continue
 
             try:
@@ -623,7 +621,7 @@ class ZMQRepWorker(QThread):
             except Exception:
                 consecutive = 0
 
-            time.sleep(0.1)
+            time.sleep(0.025)
 
         self.log_message.emit(f"ZMQ: lock timeout ch{port}")
         return False

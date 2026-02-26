@@ -187,7 +187,7 @@ class ExperimentController(QtWidgets.QMainWindow):
         # GUI refresh timers: PULL model with two cadences.
         # Fast: measurements + plots at 10 Hz
         self._gui_timer_fast = QtCore.QTimer(self)
-        self._gui_timer_fast.setTimerType(QtCore.Qt.CoarseTimer)
+        self._gui_timer_fast.setTimerType(QtCore.Qt.PreciseTimer)
         self._gui_timer_fast.timeout.connect(self._refresh_gui_fast)
         self._gui_timer_fast.start(GUI_FAST_MS)
 
@@ -224,13 +224,13 @@ class ExperimentController(QtWidgets.QMainWindow):
                 self.channels[port].update_fast(m)
 
     def _refresh_gui_slow(self):
-        """Pull status + globals at 1 Hz â€” setpoints, bounds, switcher, lock, T, P."""
-        status = self.shared.get_all_status()
-        for port, s in status.items():
+        “””Pull status + globals at 1 Hz -- setpoints, bounds, switcher, lock, T, P.”””
+        snap = self.shared.get_gui_snapshot()
+        for port, s in snap[“status”].items():
             if port in self.channels:
                 self.channels[port].update_slow(s)
 
-        g = self.shared.get_globals()
+        g = snap[“globals”]
         self.global_ctrl.update_globals(g)
         for w in self.channels.values():
             w.set_globals(g)
