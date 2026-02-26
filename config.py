@@ -47,8 +47,13 @@ PID_INT_SETTINGS = {
 LC_DOUBLE_SETTINGS = {
     "BoundsMin": wlmConst.cmiDeviationBoundsMin,
     "BoundsMax": wlmConst.cmiDeviationBoundsMax,
-    "RefMid":    wlmConst.cmiDeviationRefMid,
     "RefAt":     wlmConst.cmiDeviationRefAt,
+}
+
+# Integer settings read via GetLaserControlSetting (value lives in iSet)
+# Per WS7 manual p.131: cmiDeviationRefMid returns in iVal (1=centered, 0=explicit)
+LC_INT_SETTINGS = {
+    "RefMid":    wlmConst.cmiDeviationRefMid,
 }
 
 # Tolerance for floating-point comparison
@@ -85,6 +90,13 @@ def read_live_state(wlm, ports):
             try:
                 _i, d = wlm.get_laser_control_setting(const, port)
                 p_settings[name] = d
+            except Exception as e:
+                logger.warning(f"Failed to read {name} on port {port}: {e}")
+
+        for name, const in LC_INT_SETTINGS.items():
+            try:
+                i, _d = wlm.get_laser_control_setting(const, port)
+                p_settings[name] = i
             except Exception as e:
                 logger.warning(f"Failed to read {name} on port {port}: {e}")
 
@@ -201,6 +213,9 @@ def restore_settings(wlm, port, settings_to_restore):
                 results[name] = rc
             elif name in LC_DOUBLE_SETTINGS:
                 rc = wlm.set_laser_control_setting(LC_DOUBLE_SETTINGS[name], port, dSet=float(value))
+                results[name] = rc
+            elif name in LC_INT_SETTINGS:
+                rc = wlm.set_laser_control_setting(LC_INT_SETTINGS[name], port, iSet=int(value))
                 results[name] = rc
             elif name == "Setpoint" and value is not None:
                 wlm.set_pid_course_num(port, float(value))
