@@ -421,6 +421,7 @@ class ChannelControl(QtWidgets.QWidget):
 class GlobalControl(QtWidgets.QWidget):
     request_autocal = QtCore.pyqtSignal(bool)
     request_deviation = QtCore.pyqtSignal(bool)
+    request_save_config = QtCore.pyqtSignal()
 
     def __init__(self):
         super().__init__()
@@ -441,10 +442,16 @@ class GlobalControl(QtWidgets.QWidget):
         self.btn_dev.setMinimumWidth(120)
         self.btn_dev.clicked.connect(lambda: self.request_deviation.emit(self.btn_dev.isChecked()))
 
+        self.btn_save_config = QtWidgets.QPushButton("Save Config")
+        self.btn_save_config.setMinimumWidth(100)
+        self.btn_save_config.setToolTip("Save current PID settings to pid_config.json")
+        self.btn_save_config.clicked.connect(lambda: self.request_save_config.emit())
+
         layout.addWidget(self.lbl_wlm)
         layout.addWidget(self.lbl_temp)
         layout.addWidget(self.lbl_press)
         layout.addStretch(1)
+        layout.addWidget(self.btn_save_config)
         layout.addWidget(self.btn_auto)
         layout.addWidget(self.btn_dev)
 

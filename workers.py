@@ -5,6 +5,7 @@ import time
 import json
 import zmq
 import wlmConst
+import config
 
 PORTS = list(range(1, 9))
 
@@ -132,6 +133,9 @@ class WavemeterWorker(QObject):
 
     # Logging: only meaningful events
     log_message = pyqtSignal(str)
+
+    # Config persistence: emitted after manual save completes (success, message)
+    config_saved = pyqtSignal(bool, str)
 
     finished = pyqtSignal()
 
@@ -423,6 +427,17 @@ class WavemeterWorker(QObject):
             self.globals_updated.emit(delta)
         except Exception as e:
             self.log_message.emit(f"Deviation mode readback failed: {e}")
+
+    @pyqtSlot()
+    def handle_save_config(self):
+        """Save current PID config to JSON. Runs on worker thread for DLL safety."""
+        try:
+            config.save_config(self.wlm, PORTS)
+            self.log_message.emit("Config saved manually.")
+            self.config_saved.emit(True, f"PID settings saved to {config.CONFIG_PATH}")
+        except Exception as e:
+            self.log_message.emit(f"Manual config save failed: {e}")
+            self.config_saved.emit(False, str(e))
 
 
 class ZMQPubWorker(QThread):

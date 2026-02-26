@@ -1,3 +1,6 @@
+# Runtime PID config (machine-specific, saved on exit)
+pid_config.json
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]

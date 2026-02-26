@@ -153,18 +153,55 @@ class wlm_link():
         return wlmData.dll.SetDeviationMode(status)
 
     ##PID related functions
-    def get_pid_settings(self):
-        #not sure what this exactly does yet
-        intval=ctypes.c_long(0)
-        doubleval=ctypes.c_double(0)
-        wlmData.dll.GetPIDSetting(wlmConst.cmiPID_P,1,intval,doubleval)#intval and doubleval will have the values
-    
-    # def get_pid_course_num(self, port):
-    #     string=(ctypes.c_char*1024)()
-    #     wlmData.dll.GetPIDCourseNum(port,ctypes.cast(string, ctypes.POINTER(ctypes.c_char)))
-    #     float_value = float(string.value.decode().replace(',', '.'))
-    #     print("Target wavelength port %i = %.9f"%(port, float_value))
-    #     return float_value
+
+    def get_pid_setting(self, const, port):
+        """Read a single PID setting from the DLL.
+        Returns (iSet_value, dSet_value).
+        """
+        intval = ctypes.c_long(0)
+        doubleval = ctypes.c_double(0)
+        wlmData.dll.GetPIDSetting(
+            ctypes.c_long(const),
+            ctypes.c_long(port),
+            ctypes.byref(intval),
+            ctypes.byref(doubleval),
+        )
+        return intval.value, doubleval.value
+
+    def set_pid_setting(self, const, port, iSet=0, dSet=0.0):
+        """Write a single PID setting to the DLL. Returns DLL return code."""
+        return wlmData.dll.SetPIDSetting(
+            ctypes.c_long(const),
+            ctypes.c_long(port),
+            ctypes.c_long(iSet),
+            ctypes.c_double(dSet),
+        )
+
+    def get_laser_control_setting(self, const, port):
+        """Read a single laser control setting (bounds, ref).
+        Returns (iSet_value, dSet_value).
+        """
+        intval = ctypes.c_long(0)
+        doubleval = ctypes.c_double(0)
+        sval = ctypes.c_char_p(None)
+        wlmData.dll.GetLaserControlSetting(
+            ctypes.c_long(const),
+            ctypes.c_long(port),
+            ctypes.byref(intval),
+            ctypes.byref(doubleval),
+            sval,
+        )
+        return intval.value, doubleval.value
+
+    def set_laser_control_setting(self, const, port, iSet=0, dSet=0.0):
+        """Write a single laser control setting. Returns DLL return code."""
+        return wlmData.dll.SetLaserControlSetting(
+            ctypes.c_long(const),
+            ctypes.c_long(port),
+            ctypes.c_long(iSet),
+            ctypes.c_double(dSet),
+            ctypes.c_char_p(None),
+        )
 
     def get_pid_course_num(self, port):
         """Retrieves the setpoint wavelength for a given port.
