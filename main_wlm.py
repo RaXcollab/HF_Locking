@@ -167,7 +167,7 @@ class ExperimentController(QtWidgets.QMainWindow):
             widget.request_lock.connect(self.worker_wlm.handle_lock_toggle, QtCore.Qt.QueuedConnection)
             widget.request_switcher.connect(self.worker_wlm.handle_switcher_write, QtCore.Qt.QueuedConnection)
 
-            # 4 rows Ã— 2 columns: port 1-2 in row 0, 3-4 in row 1, etc.
+            # 4 rows -- 2 columns: port 1-2 in row 0, 3-4 in row 1, etc.
             self.grid.addWidget(widget, (port - 1) // 2, (port - 1) % 2)
 
         self.global_ctrl = display.GlobalControl()
@@ -217,20 +217,20 @@ class ExperimentController(QtWidgets.QMainWindow):
         self.zmq_rep.start()
 
     def _refresh_gui_fast(self):
-        """Pull measurements at 10 Hz â€” plots, frequency readouts, exposure, amplitude."""
+        """Pull measurements at 10 Hz -- plots, frequency readouts, exposure, amplitude."""
         meas = self.shared.get_all_measurements()
         for port, m in meas.items():
             if port in self.channels:
                 self.channels[port].update_fast(m)
 
     def _refresh_gui_slow(self):
-        “””Pull status + globals at 1 Hz -- setpoints, bounds, switcher, lock, T, P.”””
+        """Pull status + globals at 1 Hz -- setpoints, bounds, switcher, lock, T, P."""
         snap = self.shared.get_gui_snapshot()
-        for port, s in snap[“status”].items():
+        for port, s in snap["status"].items():
             if port in self.channels:
                 self.channels[port].update_slow(s)
 
-        g = snap[“globals”]
+        g = snap["globals"]
         self.global_ctrl.update_globals(g)
         for w in self.channels.values():
             w.set_globals(g)
