@@ -422,6 +422,7 @@ class GlobalControl(QtWidgets.QWidget):
     request_autocal = QtCore.pyqtSignal(bool)
     request_deviation = QtCore.pyqtSignal(bool)
     request_save_config = QtCore.pyqtSignal()
+    request_backup_wlm = QtCore.pyqtSignal()
 
     def __init__(self):
         super().__init__()
@@ -447,10 +448,19 @@ class GlobalControl(QtWidgets.QWidget):
         self.btn_save_config.setToolTip("Save current PID settings to pid_config.json")
         self.btn_save_config.clicked.connect(lambda: self.request_save_config.emit())
 
+        self.btn_backup_wlm = QtWidgets.QPushButton("Backup WLM")
+        self.btn_backup_wlm.setMinimumWidth(100)
+        self.btn_backup_wlm.setToolTip(
+            "Copy WLM app config (wlm_ws7.ini, calibration, history)\n"
+            "to a timestamped backup folder in wlm_backups/"
+        )
+        self.btn_backup_wlm.clicked.connect(lambda: self.request_backup_wlm.emit())
+
         layout.addWidget(self.lbl_wlm)
         layout.addWidget(self.lbl_temp)
         layout.addWidget(self.lbl_press)
         layout.addStretch(1)
+        layout.addWidget(self.btn_backup_wlm)
         layout.addWidget(self.btn_save_config)
         layout.addWidget(self.btn_auto)
         layout.addWidget(self.btn_dev)

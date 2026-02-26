@@ -174,6 +174,7 @@ class ExperimentController(QtWidgets.QMainWindow):
         self.global_ctrl.request_autocal.connect(self.worker_wlm.handle_autocal_toggle, QtCore.Qt.QueuedConnection)
         self.global_ctrl.request_deviation.connect(self.worker_wlm.handle_deviation_toggle, QtCore.Qt.QueuedConnection)
         self.global_ctrl.request_save_config.connect(self.worker_wlm.handle_save_config, QtCore.Qt.QueuedConnection)
+        self.global_ctrl.request_backup_wlm.connect(self.worker_wlm.handle_backup_wlm, QtCore.Qt.QueuedConnection)
         vbox.addWidget(self.global_ctrl)
 
         # Worker -> UI: only write-handler feedback (infrequent, no backlog risk)
@@ -181,6 +182,7 @@ class ExperimentController(QtWidgets.QMainWindow):
         self.worker_wlm.status_updated.connect(self.handle_slow_update)
         self.worker_wlm.globals_updated.connect(self.handle_globals_update)
         self.worker_wlm.config_saved.connect(self._on_config_saved)
+        self.worker_wlm.wlm_backup_done.connect(self._on_wlm_backup_done)
 
         # GUI refresh timers: PULL model with two cadences.
         # Fast: measurements + plots at 10 Hz
@@ -307,6 +309,14 @@ class ExperimentController(QtWidgets.QMainWindow):
             QtWidgets.QMessageBox.information(self, "Config Saved", message)
         else:
             QtWidgets.QMessageBox.warning(self, "Save Failed", message)
+
+    @QtCore.pyqtSlot(bool, str)
+    def _on_wlm_backup_done(self, success, message):
+        """Handle wlm_backup_done signal from worker thread."""
+        if success:
+            QtWidgets.QMessageBox.information(self, "WLM Backup", message)
+        else:
+            QtWidgets.QMessageBox.warning(self, "WLM Backup Failed", message)
 
     def closeEvent(self, event):
         # Stop GUI refresh

@@ -40,7 +40,7 @@ PyQt5 GUI controlling a **High Finesse WS7-30** wavemeter via `wlmData.dll` (cty
 | `workers.py` | `SharedExperimentState`, `WavemeterWorker` (polling + write handlers), `ZMQPubWorker`, `ZMQRepWorker` |
 | `display.py` | `ChannelControl` (per-channel UI: plots, setpoint, voltage, lock), `GlobalControl` (T/P/autocal/deviation/save) |
 | `wlm_utils.py` | `wlm_link` class — all DLL wrappers (frequency, setpoint, PID, bounds, switching, etc.) |
-| `config.py` | PID config persistence — `save_config`, `load_config`, `compare_configs`, `restore_settings` |
+| `config.py` | PID config persistence + WLM app config backup (`backup_wlm_config`) |
 | `wlmConst.py` | DLL constants (read-only, ~500 constants). PID constants at lines 217-237 |
 | `wlmData.py` | DLL function signatures via ctypes (read-only). PID signatures at lines 619-645 |
 | `diagnostics.py` | Optional timing instrumentation (disabled by default, `ENABLED=False`) |
@@ -118,6 +118,9 @@ Setting registries defined in `config.py` (`PID_DOUBLE_SETTINGS`, `PID_INT_SETTI
 
 - WS7 manual: `Manual WS7 NeLAC (1).pdf` in project root
 - WS7 native app persists settings between sessions via INI, but DLL-set values at runtime may NOT be saved back to INI — this is why `config.py` exists
+- WLM install dir: `C:\Program Files (x86)\HighFinesse\Wavelength Meter WS7 8407\`
+- WLM app config: `wlm_ws7.ini` (all settings), `WLM8407ST.stn` (calibration), `history.8407` (cal history)
+- "Backup WLM" button copies these 3 files to `wlm_backups/<timestamp>/` — restore is manual
 
 ## Coding Conventions
 

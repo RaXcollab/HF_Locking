@@ -136,6 +136,7 @@ class WavemeterWorker(QObject):
 
     # Config persistence: emitted after manual save completes (success, message)
     config_saved = pyqtSignal(bool, str)
+    wlm_backup_done = pyqtSignal(bool, str)
 
     finished = pyqtSignal()
 
@@ -438,6 +439,16 @@ class WavemeterWorker(QObject):
         except Exception as e:
             self.log_message.emit(f"Manual config save failed: {e}")
             self.config_saved.emit(False, str(e))
+
+    @pyqtSlot()
+    def handle_backup_wlm(self):
+        """Back up WLM app config files to a timestamped folder."""
+        success, msg = config.backup_wlm_config()
+        if success:
+            self.log_message.emit("WLM config backed up.")
+        else:
+            self.log_message.emit(f"WLM backup failed: {msg}")
+        self.wlm_backup_done.emit(success, msg)
 
 
 class ZMQPubWorker(QThread):

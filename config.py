@@ -7,6 +7,7 @@ read current DLL state, compare, and let the user decide.
 
 import json
 import os
+import shutil
 import logging
 from datetime import datetime
 
@@ -14,7 +15,13 @@ import wlmConst
 
 logger = logging.getLogger("pid_config")
 
-CONFIG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "pid_config.json")
+_APP_DIR = os.path.dirname(os.path.abspath(__file__))
+CONFIG_PATH = os.path.join(_APP_DIR, "pid_config.json")
+
+# WLM application config location
+WLM_INSTALL_DIR = r"C:\Program Files (x86)\HighFinesse\Wavelength Meter WS7 8407"
+WLM_BACKUP_DIR = os.path.join(_APP_DIR, "wlm_backups")
+_WLM_BACKUP_FILES = ["wlm_ws7.ini", "WLM8407ST.stn", "history.8407"]
 
 # ---------------------------------------------------------------------------
 # Setting registries: map human-readable names -> wlmConst constants
@@ -251,3 +258,40 @@ def format_diff_summary(diffs, channel_names):
                 lines.append(f"  {name}: current={live_val}  saved={saved_val}")
 
     return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# WLM application config backup
+# ---------------------------------------------------------------------------
+
+def backup_wlm_config():
+    """Copy WLM app config files to a timestamped backup folder.
+
+    Returns (success: bool, message: str).
+    """
+    timestamp = datetime.now().strftime("%Y-%m-%d_%H%M%S")
+    dest_dir = os.path.join(WLM_BACKUP_DIR, timestamp)
+
+    try:
+        os.makedirs(dest_dir, exist_ok=True)
+    except Exception as e:
+        return False, f"Cannot create backup dir: {e}"
+
+    copied = []
+    skipped = []
+    for fname in _WLM_BACKUP_FILES:
+        src = os.path.join(WLM_INSTALL_DIR, fname)
+        if os.path.isfile(src):
+            shutil.copy2(src, os.path.join(dest_dir, fname))
+            copied.append(fname)
+        else:
+            skipped.append(fname)
+
+    if not copied:
+        return False, f"No WLM config files found in {WLM_INSTALL_DIR}"
+
+    msg = f"Backed up {len(copied)} file(s) to:\n{dest_dir}"
+    if skipped:
+        msg += f"\n\nSkipped (not found): {', '.join(skipped)}"
+    logger.info(msg)
+    return True, msg
