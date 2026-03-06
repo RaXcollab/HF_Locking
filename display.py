@@ -100,11 +100,13 @@ class ChannelControl(QtWidgets.QWidget):
         self._voltage_pending_until = 0.0
         self._PENDING_GUARD_S = 1.0        # seconds to suppress overwrites
 
-        # Plot buffers
+        # Plot buffers — raw elapsed stored, rendered via cycle-shift + clipToView.
         self._t0 = time.perf_counter()
-        self.t = deque(maxlen=100)
-        self.f = deque(maxlen=100)     # stores MHz offset from _freq_ref
-        self.v = deque(maxlen=100)
+        self._sweep_s = 60.0
+        self._x_window = 6.0          # visible time window (seconds)
+        self.t = deque(maxlen=1200)
+        self.f = deque(maxlen=1200)    # stores MHz offset from _freq_ref
+        self.v = deque(maxlen=1200)
 
         # Widget update caches — avoid redundant setText/setValue calls
         self._last_exp_text = ""
@@ -136,11 +138,21 @@ class ChannelControl(QtWidgets.QWidget):
         self.lock_btn.setStyleSheet("font-size: 11pt; font-weight: bold;")
         self.lock_btn.clicked.connect(self._on_lock_toggled)
 
+        # Time window dropdown in row1 (between status and lock button)
+        self.cmb_xwin = QtWidgets.QComboBox()
+        self.cmb_xwin.addItems(["6s", "12s", "30s", "60s"])
+        self.cmb_xwin.setFixedWidth(50)
+        self.cmb_xwin.setFixedHeight(22)
+        self.cmb_xwin.setToolTip("Visible time window")
+        self.cmb_xwin.currentTextChanged.connect(self._on_xwin_changed)
+
         row1.addWidget(self.status_label, 3)
-        row1.addWidget(self.lock_btn, 2)      # stretches to ~40% of row
+        row1.addWidget(self.cmb_xwin)
+        row1.addWidget(self.lock_btn)
+        self.lock_btn.setFixedWidth(160)
         layout.addLayout(row1)
 
-        # -- Row 2: Use | Show | Incl SP | [setpoint] Set Freq | [mV] Set V | Exp | CCD bar --
+        # -- Row 2: checkboxes | [setpoint] Set F | [mV] Set V | Exp | CCD bars --
         row2 = QtWidgets.QHBoxLayout()
         row2.setSpacing(2)
 
@@ -149,13 +161,11 @@ class ChannelControl(QtWidgets.QWidget):
         self.chk_use.clicked.connect(self._on_switcher)
         self.chk_show.clicked.connect(self._on_switcher)
 
-        # Toggle: auto-Y-range for frequency plot
         self.chk_auto_y = QtWidgets.QCheckBox("Auto Y")
         self.chk_auto_y.setChecked(True)
         self.chk_auto_y.setToolTip("Auto-scale frequency plot Y-axis to data range")
         self.chk_auto_y.toggled.connect(self._on_auto_y_toggled)
 
-        # Toggle: include setpoint line in freq-plot Y autoscale
         self.chk_incl_sp = QtWidgets.QCheckBox("Incl SP")
         self.chk_incl_sp.setChecked(True)
         self.chk_incl_sp.setToolTip("Include setpoint in frequency plot Y-axis autoscale")
@@ -172,7 +182,7 @@ class ChannelControl(QtWidgets.QWidget):
         self.input_volt.setPlaceholderText("mV")
         self.input_volt.setFixedHeight(22)
         self.input_volt.setFixedWidth(48)
-        self.btn_volt = QtWidgets.QPushButton("Set V")
+        self.btn_volt = QtWidgets.QPushButton("Set mV")
         self.btn_volt.setFixedHeight(22)
         self.btn_volt.clicked.connect(self._on_voltage)
 
@@ -214,6 +224,9 @@ class ChannelControl(QtWidgets.QWidget):
         self.plot_freq.setMinimumHeight(90)
         self.plot_freq.getPlotItem().titleLabel.setMaximumHeight(16)
         self.plot_freq.enableAutoRange(axis="y", enable=False)
+        self.plot_freq.enableAutoRange(axis="x", enable=False)
+        self.plot_freq.setMouseEnabled(x=False)
+        self.plot_freq.setClipToView(True)
         self.plot_freq.getAxis("left").enableAutoSIPrefix(False)
         self.curve_freq = self.plot_freq.plot()
         # Setpoint & tolerance lines in MHz offset units
@@ -232,6 +245,9 @@ class ChannelControl(QtWidgets.QWidget):
         self.plot_volt.setMinimumHeight(90)
         self.plot_volt.getPlotItem().titleLabel.setMaximumHeight(16)
         self.plot_volt.enableAutoRange(axis="y", enable=False)
+        self.plot_volt.enableAutoRange(axis="x", enable=False)
+        self.plot_volt.setMouseEnabled(x=False)
+        self.plot_volt.setClipToView(True)
         self.curve_volt = self.plot_volt.plot()
         self.line_bound_min = pg.InfiniteLine(angle=0, movable=False, pen=pg.mkPen('r', style=QtCore.Qt.DashLine))
         self.line_bound_max = pg.InfiniteLine(angle=0, movable=False, pen=pg.mkPen('r', style=QtCore.Qt.DashLine))
@@ -254,6 +270,10 @@ class ChannelControl(QtWidgets.QWidget):
             self.plot_freq.enableAutoRange(axis="y", enable=False)
             self._prev_freq_yrange = (None, None, None)
         # When re-enabled, next update_fast() will recompute and snap to range
+
+    def _on_xwin_changed(self, text):
+        """Update visible time window from dropdown."""
+        self._x_window = float(text.rstrip("s"))
 
     def _update_freq_ref(self, setpoint_thz):
         """
@@ -298,7 +318,14 @@ class ChannelControl(QtWidgets.QWidget):
           - exp: (e1,e2)
           - amp: (a1,a2)
         """
-        now = time.perf_counter() - self._t0
+        elapsed = time.perf_counter() - self._t0
+
+        # Purge data older than one sweep cycle
+        cutoff = elapsed - self._sweep_s
+        while self.t and self.t[0] < cutoff:
+            self.t.popleft()
+            self.f.popleft()
+            self.v.popleft()
 
         valid = bool(meas.get("valid", False))
         f_plot = meas.get("freq_plot", None)       # None => gap
@@ -311,24 +338,37 @@ class ChannelControl(QtWidgets.QWidget):
         else:
             fplot_mhz = (float(f_plot) - self._freq_ref) * 1.0e6
 
-        self.t.append(now)
+        self.t.append(elapsed)
         self.f.append(fplot_mhz)
         self.v.append(vval)
 
-        self.curve_freq.setData(list(self.t), list(self.f))
-        self.curve_volt.setData(list(self.t), list(self.v))
+        # Render: modular time with old-cycle points shifted by -sweep
+        # so they appear left of 0 during the wrap. clipToView handles the rest.
+        t_raw = np.array(self.t)
+        cycle = elapsed // self._sweep_s
+        t_arr = t_raw % self._sweep_s
+        t_arr[(t_raw // self._sweep_s) < cycle] -= self._sweep_s
+        self.curve_freq.setData(t_arr, np.array(self.f))
+        self.curve_volt.setData(t_arr, np.array(self.v))
 
-        # --- Autoscale frequency offset Y-axis (when enabled) ---
-        if self.chk_auto_y.isChecked() and len(self.f) > 0:
-            fmin = math.inf
-            fmax = -math.inf
-            for val in self.f:
-                if math.isfinite(val):
-                    if val < fmin:
-                        fmin = val
-                    if val > fmax:
-                        fmax = val
-            if fmin <= fmax:  # at least one finite value
+        # Scrolling x-axis: trace tip at right edge
+        t_mod = elapsed % self._sweep_s
+        x_right = t_mod + 0.5
+        x_left = t_mod - self._x_window
+        self.plot_freq.setXRange(x_left, x_right, padding=0)
+        self.plot_volt.setXRange(x_left, x_right, padding=0)
+
+        # --- Autoscale Y-axes using only visible points ---
+        vis = (t_arr >= x_left) & (t_arr <= x_right)
+        f_arr = np.array(self.f)
+        v_arr = np.array(self.v)
+
+        if self.chk_auto_y.isChecked() and vis.any():
+            f_vis = f_arr[vis]
+            f_finite = f_vis[np.isfinite(f_vis)]
+            if len(f_finite) > 0:
+                fmin = float(f_finite.min())
+                fmax = float(f_finite.max())
                 if self.chk_incl_sp.isChecked():
                     fmin = min(fmin, self._sp_mhz)
                     fmax = max(fmax, self._sp_mhz)
@@ -339,16 +379,12 @@ class ChannelControl(QtWidgets.QWidget):
                     self.plot_freq.setYRange(ylo, yhi, padding=0)
                     self.plot_freq.getAxis("left").setTickSpacing(step, step / 5.0)
 
-        # --- Autoscale voltage Y-axis ---
-        if len(self.v) > 0:
-            vmin = math.inf
-            vmax = -math.inf
-            for val in self.v:
-                if math.isfinite(val):
-                    if val < vmin:
-                        vmin = val
-                    if val > vmax:
-                        vmax = val
+        if vis.any():
+            v_vis = v_arr[vis]
+            v_finite = v_vis[np.isfinite(v_vis)]
+            if len(v_finite) > 0:
+                vmin = float(v_finite.min())
+                vmax = float(v_finite.max())
             if vmin <= vmax:  # at least one finite value
                 span = vmax - vmin
                 if span < VOLT_MIN_RANGE:

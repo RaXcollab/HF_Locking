@@ -6,15 +6,22 @@ import workers
 import display
 import config
 
-# Set process priority to HIGH to minimize latency jitter (optional, but can help with responsiveness).
+# Elevate process priority to reduce latency jitter.
+# HIGH requires admin; ABOVE_NORMAL works for regular users.
 import ctypes
-ctypes.windll.kernel32.SetPriorityClass(
-    ctypes.windll.kernel32.GetCurrentProcess(),
-    0x00000080  # HIGH_PRIORITY_CLASS
-)
-# ABOVE_NORMAL_PRIORITY_CLASS = 0x00008000
-# HIGH_PRIORITY_CLASS = 0x00000080
-# REALTIME_PRIORITY_CLASS = 0x00000100  # Will freeze system, use with caution~
+import ctypes.wintypes
+_kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+_kernel32.GetCurrentProcess.restype = ctypes.wintypes.HANDLE
+_kernel32.SetPriorityClass.argtypes = [ctypes.wintypes.HANDLE, ctypes.wintypes.DWORD]
+_kernel32.SetPriorityClass.restype = ctypes.wintypes.BOOL
+_handle = _kernel32.GetCurrentProcess()
+if _kernel32.SetPriorityClass(_handle, 0x00000080):       # HIGH_PRIORITY_CLASS
+    print("[PRIORITY] Set to HIGH")
+elif _kernel32.SetPriorityClass(_handle, 0x00008000):     # ABOVE_NORMAL_PRIORITY_CLASS
+    print("[PRIORITY] HIGH requires admin, set to ABOVE_NORMAL")
+else:
+    _err = ctypes.get_last_error()
+    print(f"[PRIORITY] Failed to elevate priority (error {_err})")
 
 CHANNEL_NAMES = {
     1: "Ch_1", 
@@ -30,11 +37,12 @@ CHANNEL_NAMES = {
 PORTS = range(1, 9)
 
 # GUI refresh rates decoupled from worker poll rates.
-GUI_FAST_MS = 30    # measurements, plots
+GUI_FAST_MS = 33    # measurements, plots (~30 FPS)
 GUI_SLOW_MS = 500   # status, globals (setpoints/bounds/T/P rarely change)
 
 ICON_PATH = "laser.ico"  # Path to your custom icon file
 WINDOW_TITLE = "HighFinesse WLM Controller"
+TARGET_SCREEN = r"\\.\DISPLAY5"  # Match by QScreen.name(); fallback to primary
 
 class _RestoreDialog(QtWidgets.QDialog):
     """Dialog showing config differences with checkboxes for selective restore."""
@@ -185,9 +193,12 @@ class ExperimentController(QtWidgets.QMainWindow):
         self.worker_wlm.wlm_backup_done.connect(self._on_wlm_backup_done)
 
         # GUI refresh timers: PULL model with two cadences.
-        # Fast: measurements + plots at 10 Hz
+        # Fast: measurements + plots (~30 FPS)
+        self._busy_gui_fast = False  # re-entrancy guard for _refresh_gui_fast
+        self._gui_skip_count = 0     # frames skipped due to overload
+        self._gui_frame_count = 0    # total frames attempted
         self._gui_timer_fast = QtCore.QTimer(self)
-        self._gui_timer_fast.setTimerType(QtCore.Qt.PreciseTimer)
+        self._gui_timer_fast.setTimerType(QtCore.Qt.CoarseTimer)
         self._gui_timer_fast.timeout.connect(self._refresh_gui_fast)
         self._gui_timer_fast.start(GUI_FAST_MS)
 
@@ -217,14 +228,27 @@ class ExperimentController(QtWidgets.QMainWindow):
         self.zmq_rep.start()
 
     def _refresh_gui_fast(self):
-        """Pull measurements at 10 Hz -- plots, frequency readouts, exposure, amplitude."""
-        meas = self.shared.get_all_measurements()
-        for port, m in meas.items():
-            if port in self.channels:
-                self.channels[port].update_fast(m)
+        """Pull measurements at ~30 FPS -- plots, frequency readouts, exposure, amplitude."""
+        self._gui_frame_count += 1
+        if self._busy_gui_fast:
+            self._gui_skip_count += 1
+            return
+        self._busy_gui_fast = True
+        try:
+            meas = self.shared.get_all_measurements()
+            for port, m in meas.items():
+                if port in self.channels:
+                    self.channels[port].update_fast(m)
+        finally:
+            self._busy_gui_fast = False
 
     def _refresh_gui_slow(self):
         """Pull status + globals at 1 Hz -- setpoints, bounds, switcher, lock, T, P."""
+        # Log frame skip rate (overload indicator)
+        if self._gui_skip_count > 0:
+            print(f"[PERF] Skipped {self._gui_skip_count}/{self._gui_frame_count} frames")
+        self._gui_skip_count = 0
+        self._gui_frame_count = 0
         snap = self.shared.get_gui_snapshot()
         for port, s in snap["status"].items():
             if port in self.channels:
@@ -255,7 +279,12 @@ class ExperimentController(QtWidgets.QMainWindow):
         super().showEvent(event)
         if not self._initial_position_done:
             self._initial_position_done = True
-            screen = QtWidgets.QApplication.primaryScreen().availableGeometry()
+            target = None
+            for s in QtWidgets.QApplication.screens():
+                if s.name() == TARGET_SCREEN:
+                    target = s
+                    break
+            screen = (target or QtWidgets.QApplication.primaryScreen()).availableGeometry()
             frame = self.frameGeometry().height() - self.geometry().height()
             half_w = screen.width() // 2
             self.move(screen.x(), screen.y())
