@@ -19,6 +19,7 @@ ZMQ_PUB_PORT = 3797
 PUB_PERIOD_S = 0.1            # 10 Hz
 LOCK_TOLERANCE = 0.000005     # THz
 LOCK_TIMEOUT_S = 60.0
+LOCK_CONSECUTIVE = 5
 MIN_VALID_SETPOINT_THZ = 1.0  # reject bogus setpoints (e.g. 0 from remote init)
 
 # If you haven't removed the print() inside wlm_utils.get_pid_course_num(),
@@ -613,7 +614,7 @@ class ZMQRepWorker(QThread):
             try:
                 if abs(float(f) - target) < LOCK_TOLERANCE:
                     consecutive += 1
-                    if consecutive >= 2:
+                    if consecutive >= LOCK_CONSECUTIVE:
                         self.log_message.emit(f"ZMQ: lock achieved ch{port}")
                         return True
                 else:
