@@ -6,8 +6,14 @@ import workers
 import display
 import config
 
-# Elevate process priority to reduce latency jitter.
-# HIGH requires admin; ABOVE_NORMAL works for regular users.
+# Elevate process priority to reduce latency jitter. ABOVE_NORMAL (base 10) is
+# preferred over HIGH (base 13) here because Microsoft explicitly warns that
+# HIGH should be reserved for brief time-critical *events*, not sustained
+# loops — the wavemeter polls continuously at 20 ms, so HIGH risks starving
+# system threads (disk, audio, USB) which sit at base priority 8-12.
+# ABOVE_NORMAL still beats NORMAL and the foreground-priority boost (which
+# only affects NORMAL-class processes), without crowding out the kernel.
+# Doesn't require admin either. See Scheduling Priorities docs.
 import ctypes
 import ctypes.wintypes
 _kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
@@ -15,13 +21,39 @@ _kernel32.GetCurrentProcess.restype = ctypes.wintypes.HANDLE
 _kernel32.SetPriorityClass.argtypes = [ctypes.wintypes.HANDLE, ctypes.wintypes.DWORD]
 _kernel32.SetPriorityClass.restype = ctypes.wintypes.BOOL
 _handle = _kernel32.GetCurrentProcess()
-if _kernel32.SetPriorityClass(_handle, 0x00000080):       # HIGH_PRIORITY_CLASS
-    print("[PRIORITY] Set to HIGH")
-elif _kernel32.SetPriorityClass(_handle, 0x00008000):     # ABOVE_NORMAL_PRIORITY_CLASS
-    print("[PRIORITY] HIGH requires admin, set to ABOVE_NORMAL")
+if _kernel32.SetPriorityClass(_handle, 0x00008000):       # ABOVE_NORMAL_PRIORITY_CLASS
+    print("[PRIORITY] Set to ABOVE_NORMAL")
 else:
     _err = ctypes.get_last_error()
-    print(f"[PRIORITY] Failed to elevate priority (error {_err})")
+    print(f"[PRIORITY] Failed to set priority (error {_err})")
+
+# Opt out of Windows EcoQoS execution-speed throttling so the wavemeter UI and
+# worker threads keep running at full CPU clock when the window loses focus.
+# Requires Windows 10 1709+ (build 16299). Independent of priority class.
+class _PROCESS_POWER_THROTTLING_STATE(ctypes.Structure):
+    _fields_ = [
+        ("Version", ctypes.wintypes.ULONG),
+        ("ControlMask", ctypes.wintypes.ULONG),
+        ("StateMask", ctypes.wintypes.ULONG),
+    ]
+_kernel32.SetProcessInformation.argtypes = [
+    ctypes.wintypes.HANDLE, ctypes.c_int,
+    ctypes.c_void_p, ctypes.wintypes.DWORD,
+]
+_kernel32.SetProcessInformation.restype = ctypes.wintypes.BOOL
+_state = _PROCESS_POWER_THROTTLING_STATE()
+_state.Version     = 1     # PROCESS_POWER_THROTTLING_CURRENT_VERSION
+_state.ControlMask = 0x1   # PROCESS_POWER_THROTTLING_EXECUTION_SPEED
+_state.StateMask   = 0     # 0 with ControlMask set => disable throttling
+_PROCESS_INFO_POWER_THROTTLING = 4  # ProcessPowerThrottling enum
+if _kernel32.SetProcessInformation(
+    _handle, _PROCESS_INFO_POWER_THROTTLING,
+    ctypes.byref(_state), ctypes.sizeof(_state),
+):
+    print("[POWER] EcoQoS execution-speed throttling disabled")
+else:
+    _err = ctypes.get_last_error()
+    print(f"[POWER] Failed to disable power throttling (error {_err})")
 
 CHANNEL_NAMES = {
     1: "Ch_1", 
@@ -38,7 +70,7 @@ PORTS = range(1, 9)
 
 # GUI refresh rates decoupled from worker poll rates.
 GUI_FAST_MS = 33    # measurements, plots (~30 FPS)
-GUI_SLOW_MS = 500   # status, globals (setpoints/bounds/T/P rarely change)
+GUI_SLOW_MS = 1000  # status, globals — matches worker slow producer (1 Hz)
 
 ICON_PATH = "laser.ico"  # Path to your custom icon file
 WINDOW_TITLE = "HighFinesse WLM Controller"
@@ -198,7 +230,10 @@ class ExperimentController(QtWidgets.QMainWindow):
         self._gui_skip_count = 0     # frames skipped due to overload
         self._gui_frame_count = 0    # total frames attempted
         self._gui_timer_fast = QtCore.QTimer(self)
-        self._gui_timer_fast.setTimerType(QtCore.Qt.CoarseTimer)
+        # PreciseTimer (vs CoarseTimer) holds 33 ms cadence to ±1 ms instead of
+        # ±5-15 ms, eliminating visible stutter at the cycle-shift wrap boundary
+        # and under system load. Worker fast already uses PreciseTimer.
+        self._gui_timer_fast.setTimerType(QtCore.Qt.PreciseTimer)
         self._gui_timer_fast.timeout.connect(self._refresh_gui_fast)
         self._gui_timer_fast.start(GUI_FAST_MS)
 
