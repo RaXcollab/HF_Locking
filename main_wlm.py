@@ -230,10 +230,7 @@ class ExperimentController(QtWidgets.QMainWindow):
         self._gui_skip_count = 0     # frames skipped due to overload
         self._gui_frame_count = 0    # total frames attempted
         self._gui_timer_fast = QtCore.QTimer(self)
-        # PreciseTimer (vs CoarseTimer) holds 33 ms cadence to ±1 ms instead of
-        # ±5-15 ms, eliminating visible stutter at the cycle-shift wrap boundary
-        # and under system load. Worker fast already uses PreciseTimer.
-        self._gui_timer_fast.setTimerType(QtCore.Qt.PreciseTimer)
+        self._gui_timer_fast.setTimerType(QtCore.Qt.CoarseTimer)
         self._gui_timer_fast.timeout.connect(self._refresh_gui_fast)
         self._gui_timer_fast.start(GUI_FAST_MS)
 
