@@ -1,5 +1,6 @@
 # controller.py
 import sys
+import threading
 from PyQt5 import QtWidgets, QtCore, QtGui
 import wlm_utils
 import workers
@@ -79,6 +80,8 @@ TARGET_SCREEN = r"\\.\DISPLAY5"  # Match by QScreen.name(); fallback to primary
 class _RestoreDialog(QtWidgets.QDialog):
     """Dialog showing config differences with checkboxes for selective restore."""
 
+    console_response = QtCore.pyqtSignal(bool)
+
     def __init__(self, diffs, channel_names, saved_at, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Restore PID Config")
@@ -87,6 +90,11 @@ class _RestoreDialog(QtWidgets.QDialog):
 
         self._diffs = diffs
         self._checkboxes = {}  # {(port, name): QCheckBox}
+
+        # Console fallback: background stdin reader emits this when user types
+        # 'y' / 'n'. Routed through a slot so the accept/reject happens on the
+        # Qt main thread (AutoConnection -> QueuedConnection across threads).
+        self.console_response.connect(self._on_console_response)
 
         layout = QtWidgets.QVBoxLayout(self)
 
@@ -158,6 +166,18 @@ class _RestoreDialog(QtWidgets.QDialog):
                         approved.setdefault(port, {})[name] = saved
                         break
         return approved
+
+    @QtCore.pyqtSlot(bool)
+    def _on_console_response(self, accept):
+        """Resolve the modal dialog from the console stdin reader.
+        accept=True keeps every checkbox in its current (default = all checked) state.
+        """
+        if accept:
+            print("[CONFIG] Console: restoring all flagged settings")
+            self.accept()
+        else:
+            print("[CONFIG] Console: skipping restore")
+            self.reject()
 
 
 class ExperimentController(QtWidgets.QMainWindow):
@@ -345,7 +365,63 @@ class ExperimentController(QtWidgets.QMainWindow):
         print(summary)
 
         dialog = _RestoreDialog(diffs, CHANNEL_NAMES, saved.get("saved_at", "unknown"), self)
+
+        # Always-on-top + explicit placement on TARGET_SCREEN: the dialog runs
+        # before win.show(), so its parent has no geometry yet — on multi-monitor
+        # Win11 it could otherwise pop on a screen the user isn't watching.
+        dialog.setWindowFlag(QtCore.Qt.WindowStaysOnTopHint, True)
+        target = None
+        for s in QtWidgets.QApplication.screens():
+            if s.name() == TARGET_SCREEN:
+                target = s
+                break
+        scr = (target or QtWidgets.QApplication.primaryScreen()).availableGeometry()
+        # adjustSize() forces a layout pass so sizeHint() reflects the actual
+        # contents (the diff list can exceed the 500x400 minimum). Cheap to call
+        # on an unshown dialog.
+        dialog.adjustSize()
+        dw = max(dialog.sizeHint().width(), dialog.minimumWidth())
+        dh = max(dialog.sizeHint().height(), dialog.minimumHeight())
+        dialog.move(scr.x() + (scr.width() - dw) // 2, scr.y() + (scr.height() - dh) // 2)
+
+        # Console fallback: a daemon thread reads stdin so the user can also
+        # type 'y'/'n' in the launching CMD console instead of clicking the
+        # dialog. Whichever resolves first wins. Daemon thread is killed on
+        # process exit; a stray line after exec_() returns is consumed and
+        # discarded via reader_done.
+        reader_done = threading.Event()
+
+        def _stdin_reader():
+            try:
+                while not reader_done.is_set():
+                    line = sys.stdin.readline()
+                    if not line:
+                        return  # EOF (stdin closed)
+                    if reader_done.is_set():
+                        return
+                    ch = line.strip().lower()
+                    if ch in ("y", "yes", "r", "restore"):
+                        dialog.console_response.emit(True)
+                        return
+                    if ch in ("n", "no", "s", "skip"):
+                        dialog.console_response.emit(False)
+                        return
+                    print("[CONFIG] Type 'y' to restore all, 'n' to skip, or use the dialog.")
+            except Exception as e:
+                print(f"[CONFIG] stdin reader exited: {e!r}")
+                return
+
+        threading.Thread(target=_stdin_reader, daemon=True).start()
+
+        print("[CONFIG] >>> ACTION REQUIRED <<< Restore dialog open on the wavemeter screen.")
+        print("[CONFIG] Click a dialog button OR type 'y' (restore all) / 'n' (skip) here + Enter.")
+        # Defer raise_/activateWindow to the first event-loop tick after exec_()
+        # shows the dialog. Calling show() before exec_() would double-show and
+        # could re-trigger placement on some Qt 5.15 builds — exactly the failure
+        # mode this whole block is trying to prevent.
+        QtCore.QTimer.singleShot(0, lambda: (dialog.raise_(), dialog.activateWindow()))
         result = dialog.exec_()
+        reader_done.set()  # stdin reader will discard any future line
 
         if result == QtWidgets.QDialog.Accepted:
             approved = dialog.get_approved_settings()
