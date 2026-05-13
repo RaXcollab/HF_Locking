@@ -378,6 +378,11 @@ class WavemeterWorker(QObject):
     @pyqtSlot(int, bool, bool)
     def handle_switcher_write(self, port: int, use: bool, show: bool):
         self.wlm.set_switcher_signal(port, int(use), int(show))
+        # Drop stale cached frequency when channel leaves the switcher cycle, so
+        # subsequent polls (HARD_INVALID for disabled ports) yield freq_display=None
+        # and ZMQ broadcasts a clean 0.0 sentinel instead of the pre-toggle value.
+        if not use:
+            self._last_good_freq[port] = None
         self.log_message.emit(f"Switcher write ch{port}: use={use} show={show}")
 
         # targeted readback: use/show only

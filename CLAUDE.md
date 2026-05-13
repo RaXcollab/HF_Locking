@@ -20,7 +20,7 @@ PyQt5 GUI controlling a **High Finesse WS7-30** wavemeter via `wlmData.dll` (cty
 ### Data Flow
 
 - **Worker → SharedState:** Mutex-protected `SharedExperimentState` (single `QMutex`)
-- **SharedState → GUI:** PULL model — GUI timers read snapshots (fast @ 30ms, slow @ 500ms)
+- **SharedState → GUI:** PULL model — GUI timers read snapshots (fast @ 33ms/~30FPS, slow @ 500ms)
 - **GUI → Worker:** PUSH via `QueuedConnection` signals (thread-safe, non-blocking)
 - **Write handlers:** Full DLL read-back + delta emit for immediate UI feedback
 
@@ -31,6 +31,8 @@ PyQt5 GUI controlling a **High Finesse WS7-30** wavemeter via `wlmData.dll` (cty
 - **Pending guards** (1s) on UI inputs — prevents clobber before DLL confirms
 - **Frequency normalization:** Handles `InfNothingChanged` (-7) sentinel gracefully
 - **Config persistence:** JSON with atomic writes, read-before-write, user-approved restore dialog
+- **Plot x-axis uses cycle-shift** — do NOT use raw `% 60` (breaks clipToView). See `update_fast()` in display.py.
+- **clipToView enabled** — x-data must stay monotonic or clipping breaks. Y-autoscale must scope to visible window only.
 
 ## File Map
 
@@ -44,8 +46,6 @@ PyQt5 GUI controlling a **High Finesse WS7-30** wavemeter via `wlmData.dll` (cty
 | `wlmConst.py` | DLL constants (read-only, ~500 constants). PID constants at lines 217-237 |
 | `wlmData.py` | DLL function signatures via ctypes (read-only). PID signatures at lines 619-645 |
 | `diagnostics.py` | Optional timing instrumentation (disabled by default, `ENABLED=False`) |
-| `display_wide.py` | Wide-layout variant of display.py (simpler, no offset plots) |
-| `main_wlm_wide.py` | Wide-layout variant — **incomplete**, lacks config persistence |
 
 ## Channel Configuration
 
@@ -135,5 +135,4 @@ Setting registries defined in `config.py` (`PID_DOUBLE_SETTINGS`, `PID_INT_SETTI
 
 - `wlm_utils.py`: `set_deviation_bounds()` not implemented (line 254)
 - `wlm_utils.py`: `GetAutoCalSetting` not implemented (line 71)
-- `main_wlm_wide.py`: Missing config persistence, incomplete signal connections — not production-ready
 - `diagnostics.py`: Disabled (`ENABLED=False`) — available for performance tuning

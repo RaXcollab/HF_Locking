@@ -318,6 +318,9 @@ class ChannelControl(QtWidgets.QWidget):
           - exp: (e1,e2)
           - amp: (a1,a2)
         """
+        if not self.chk_use.isChecked():
+            return
+
         elapsed = time.perf_counter() - self._t0
 
         # Purge data older than one sweep cycle
@@ -508,6 +511,32 @@ class ChannelControl(QtWidgets.QWidget):
         self.request_lock.emit(self.port, self.lock_btn.isChecked())
 
     def _on_switcher(self):
+        if not self.chk_use.isChecked():
+            # Auto-disable lock when channel is taken out of the cycle
+            if self.lock_btn.isChecked():
+                self.lock_btn.blockSignals(True)
+                self.lock_btn.setChecked(False)
+                self.lock_btn.blockSignals(False)
+                self.request_lock.emit(self.port, False)
+            self.t.clear()
+            self.f.clear()
+            self.v.clear()
+            self.curve_freq.setData([], [])
+            self.curve_volt.setData([], [])
+            # Reset readouts so a Use=off channel doesn't show a stale "Locked" badge
+            self.lbl_exp.setText("Exp: --")
+            self.bar_amp1.setValue(0)
+            self.bar_amp2.setValue(0)
+            self.status_label.setText(
+                f"<b>{self.name}: <span style='color:#7f8c8d'>INACTIVE</span></b>"
+            )
+            # Invalidate guarded-update caches so re-enable triggers fresh setText
+            self._last_exp_text = None
+            self._last_amp1 = -1
+            self._last_amp2 = -1
+            self._last_status_text = None
+            self._prev_freq_yrange = None
+            self._prev_volt_yrange = None
         self.request_switcher.emit(self.port, self.chk_use.isChecked(), self.chk_show.isChecked())
 
 
