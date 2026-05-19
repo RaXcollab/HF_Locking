@@ -100,6 +100,18 @@ class ChannelControl(QtWidgets.QWidget):
         self._voltage_pending_until = 0.0
         self._PENDING_GUARD_S = 1.0        # seconds to suppress overwrites
 
+        # Dirty flags: True while the user has typed an unsubmitted edit in
+        # the box. The hasFocus()/pending-guard pair does NOT cover the
+        # press->release window of the Set F/Set mV button itself: a click
+        # is two event-loop iterations, focus leaves the box on *press*,
+        # but the pending guard is only armed on *release* (in _on_setpoint).
+        # A slow-poll QTimer firing in that gap would clobber the typed
+        # value with the stale cached one before _on_setpoint reads it.
+        # textEdited fires only on user edits (not programmatic setText),
+        # so this flag is the real "unsubmitted edit" invariant.
+        self._setpoint_dirty = False
+        self._voltage_dirty = False
+
         # Plot buffers — raw elapsed stored, rendered via cycle-shift + clipToView.
         self._t0 = time.perf_counter()
         self._sweep_s = 60.0
@@ -177,6 +189,7 @@ class ChannelControl(QtWidgets.QWidget):
         self.btn_set = QtWidgets.QPushButton("Set F")
         self.btn_set.setFixedHeight(22)
         self.btn_set.clicked.connect(self._on_setpoint)
+        self.input_set.textEdited.connect(self._on_setpoint_edited)
 
         self.input_volt = QtWidgets.QLineEdit()
         self.input_volt.setPlaceholderText("mV")
@@ -185,6 +198,7 @@ class ChannelControl(QtWidgets.QWidget):
         self.btn_volt = QtWidgets.QPushButton("Set mV")
         self.btn_volt.setFixedHeight(22)
         self.btn_volt.clicked.connect(self._on_voltage)
+        self.input_volt.textEdited.connect(self._on_voltage_edited)
 
         self.lbl_exp = QtWidgets.QLabel("Exp: N/A")
         self.lbl_exp.setFixedHeight(22)
@@ -459,7 +473,9 @@ class ChannelControl(QtWidgets.QWidget):
             self.line_tol_up.setPos(self._sp_mhz + tol_mhz)
             self.line_tol_dn.setPos(self._sp_mhz - tol_mhz)
 
-            if not self.input_set.hasFocus() and time.perf_counter() > self._setpoint_pending_until:
+            if (not self.input_set.hasFocus()
+                    and not self._setpoint_dirty
+                    and time.perf_counter() > self._setpoint_pending_until):
                 self.input_set.setText(f"{sp:.6f}")
 
         if "bound_min" in status or "bound_max" in status:
@@ -491,9 +507,23 @@ class ChannelControl(QtWidgets.QWidget):
             self.lock_btn.blockSignals(False)
 
     # ----- user actions -----
+    def _on_setpoint_edited(self, text):
+        # User typed in the setpoint box: suppress pull-refresh clobber
+        # until they submit (Set F) or clear the box. An empty box is not
+        # dirty, so clearing it resumes auto-refresh from the live value.
+        self._setpoint_dirty = bool(text.strip())
+
+    def _on_voltage_edited(self, text):
+        # Defensive twin of _on_setpoint_edited. Currently latent: nothing
+        # auto-refreshes input_volt, so the guard never fires today — but it
+        # makes the voltage box safe-by-construction if a pull-refresh is
+        # ever added to update_slow (mirrors the setpoint mechanism above).
+        self._voltage_dirty = bool(text.strip())
+
     def _on_setpoint(self):
         try:
             val = float(self.input_set.text())
+            self._setpoint_dirty = False
             self._setpoint_pending_until = time.perf_counter() + self._PENDING_GUARD_S
             self.request_setpoint.emit(self.port, val)
         except Exception:
@@ -502,6 +532,7 @@ class ChannelControl(QtWidgets.QWidget):
     def _on_voltage(self):
         try:
             val = float(self.input_volt.text())
+            self._voltage_dirty = False
             self._voltage_pending_until = time.perf_counter() + self._PENDING_GUARD_S
             self.request_voltage.emit(self.port, val)
         except Exception:
@@ -530,6 +561,10 @@ class ChannelControl(QtWidgets.QWidget):
             self.status_label.setText(
                 f"<b>{self.name}: <span style='color:#7f8c8d'>INACTIVE</span></b>"
             )
+            # Clear unsubmitted-edit guards: a dirtied box on a disabled
+            # channel must not stay frozen forever — re-enable refreshes it.
+            self._setpoint_dirty = False
+            self._voltage_dirty = False
             # Invalidate guarded-update caches so re-enable triggers fresh setText
             self._last_exp_text = None
             self._last_amp1 = -1
