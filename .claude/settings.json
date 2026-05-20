@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python -c \":*)",
+      "Read(//c/Program Files \\(x86\\)/HighFinesse/Wavelength Meter WS7 8407/**)",
+      "Bash(cat \"C:/Program Files \\(x86\\)/HighFinesse/Wavelength Meter WS7 8407/wlm_ws7.ini\")",
+      "Bash(git add CLAUDE.md config.py)",
+      "Bash(git commit:*)"
+    ]
+  }
+}

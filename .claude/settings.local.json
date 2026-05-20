@@ -1,0 +1,16 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(xargs ls -la)",
+      "Bash(wc -l /c/Users/radmo/labscript-suite/GUIs/HF_Locking/*.py)",
+      "Bash(xargs grep -l \"restore\\\\|config\\\\|pid_config\\\\|ConfigDialog\")",
+      "Read(//c/Users/radmo/labscript-suite/userlib/**)",
+      "Read(//c/Users/radmo/**)",
+      "Read(//c/Users/radmo/labscript-suite/GUIs/**)",
+      "Bash(pip show pymupdf)",
+      "Bash(pip show PyPDF2)",
+      "Bash(pip show pdfplumber)",
+      "Bash(python -c \":*)"
+    ]
+  }
+}
