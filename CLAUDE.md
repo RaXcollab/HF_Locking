@@ -93,7 +93,7 @@ PORTS = range(1, 9)
 - Pending guard (display.py) is a **non-issue** for remote writes — only triggers on local "Set F" clicks
 - Status delta merge is a **non-issue** — SharedState updated before signal emit
 - Lock-wait timing: 100ms poll absorbs ~1ms queued signal latency — first poll sees new setpoint
-- `LOCK_CONSECUTIVE` requires **2** consecutive readings (not 3)
+- `LOCK_CONSECUTIVE` requires **5** consecutive in-tol readings (per `workers.py:22`; tol `LOCK_TOLERANCE=5e-6 THz = 5 MHz`; timeout `LOCK_TIMEOUT_S=60`)
 - Silent rejection of setpoints < 1.0 THz is low-risk — BLACS spinbox limits enforce valid ranges
 
 ## PID Config Persistence
