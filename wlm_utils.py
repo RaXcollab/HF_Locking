@@ -67,10 +67,6 @@ class wlm_link():
     def set_autocal_mode(self, status):
         return wlmData.dll.SetAutoCalMode(status)
 
-    
-
-    #TODO: GetAutoCalSetting
-
 
     ##Basic comms
     def get_frequency(self):
