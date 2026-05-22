@@ -133,6 +133,4 @@ Setting registries defined in `config.py` (`PID_DOUBLE_SETTINGS`, `PID_INT_SETTI
 
 ## Known TODOs in Code
 
-- `wlm_utils.py`: `set_deviation_bounds()` not implemented (line 254)
-- `wlm_utils.py`: `GetAutoCalSetting` not implemented (line 71)
 - `diagnostics.py`: Disabled (`ENABLED=False`) — available for performance tuning
