@@ -68,14 +68,34 @@ PORTS = range(1, 9)
 
 ### ZMQ Protocol
 
-**REP/REQ (port 3796)** — `ZMQRepWorker` handles:
-- `HELLO` — connection check
-- `PROGRAM_VALUE` — write setpoint, optionally wait for lock convergence (up to 60s)
-- `CHECK_VALUE` — read current setpoint from `SharedExperimentState`
+**v2 protocol** (2026-05-23): REQ-REP envelope is JSON with `id`/`status`
+enum/`error.{code,message,retryable}` — see canonical spec
+[`docs/remotecontrol-zmq-protocol-v2.md`](../../docs/remotecontrol-zmq-protocol-v2.md).
+`ZMQRepWorker(QThread)` owns the QThread loop; an inner
+`_LaserLockV2Server(RemoteControlServerBase)` (imported from parent's
+`userlib/external_gui_lib/zmq_v2.py`) dispatches via `@handler` methods.
+
+**REP/REQ (port 3796)** — actions:
+- `HELLO` — connection check; advertises
+  `capabilities=["heartbeat", "monitors", "wait_for_lock"]`. No
+  `connections` key (single-instance server).
+- `PROGRAM_VALUE` — write setpoint. `wait_for_lock` lives in v2 `args`
+  dict (NOT top-level per Q2). On timeout returns v2 `TIMEOUT` status
+  with `error.retryable=True`. Silent lock-bypass (wait=True but
+  `lock_enabled`/`deviation_mode` False) is logged as WARNING.
+- `CHECK_VALUE` — read current setpoint from `SharedExperimentState`.
+  Uninitialized port returns `UNKNOWN_CONNECTION` /
+  `setpoint_not_initialized` (NOT 0.0).
+- Port range validated (`1`..`8`); out-of-range returns
+  `UNKNOWN_CONNECTION` / `port_out_of_range`.
 
 **PUB (port 3797)** — `ZMQPubWorker` broadcasts:
 - `heartbeat` string (~10 Hz)
-- `"{port} {freq_display}"` per port
+- `"{port} {freq_display}"` per port (legacy bare-integer topic; kept
+  for spec-cascade avoidance per Q2 vs Q4 resolution — NOT migrated to
+  the spec §4.1 `{conn}_{param}_monitor` form because BLACS-side
+  `RemoteAnalogMonitor` declares `connection=<int>` and the labscript
+  connection-table cascade is out of scope).
 
 ### BLACS-Side Device Classes (in `~/labscript-suite/userlib/user_devices/`)
 
