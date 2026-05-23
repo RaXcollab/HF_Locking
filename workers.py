@@ -540,12 +540,17 @@ class _LaserLockV2Server(RemoteControlServerBase):
         super().__init__("LaserLockGUI", transport)
         self._outer = outer
 
-    @handler("PROGRAM_VALUE")
-    def _handle_program(self, connection, value, args, request_id):
+    def _parse_port(self, connection, request_id):
+        """Common port-string -> int + range validation. Returns
+        (port, None) on success, (None, error_reply_bytes) on failure.
+
+        Review I3 2026-05-23: PORTS is range(1, 9); accepting port=0
+        or >=9 silently passes through to the DLL with undefined
+        behavior. Reject up-front."""
         try:
             port = int(connection)
         except (TypeError, ValueError):
-            return encode_reply(
+            return None, encode_reply(
                 status="UNKNOWN_CONNECTION", request_id=request_id,
                 error={
                     "code": "unknown_connection",
@@ -553,6 +558,22 @@ class _LaserLockV2Server(RemoteControlServerBase):
                     "retryable": False,
                 },
             )
+        if port not in PORTS:
+            return None, encode_reply(
+                status="UNKNOWN_CONNECTION", request_id=request_id,
+                error={
+                    "code": "port_out_of_range",
+                    "message": f"port {port} not in {sorted(PORTS)}",
+                    "retryable": False,
+                },
+            )
+        return port, None
+
+    @handler("PROGRAM_VALUE")
+    def _handle_program(self, connection, value, args, request_id):
+        port, err = self._parse_port(connection, request_id)
+        if err is not None:
+            return err
         try:
             target = float(value)
         except (TypeError, ValueError):
@@ -591,24 +612,40 @@ class _LaserLockV2Server(RemoteControlServerBase):
                     "retryable": True,
                 },
             )
+        # Review C2 2026-05-23: if caller asked to wait but the AND-gate
+        # conditions weren't met, log a WARNING so the operator sees the
+        # silent lock-bypass in BLACS.log (the setpoint was still written
+        # via the signal emit above, so the lab state has changed).
+        if wait and not (lock_enabled and dev_mode):
+            self._outer.log_message.emit(
+                f"WARNING: ZMQ wait_for_lock=True ignored for ch{port} "
+                f"(lock_enabled={lock_enabled}, deviation_mode={dev_mode}); "
+                f"setpoint written without waiting for convergence")
         return encode_reply(status="SUCCESS", request_id=request_id)
 
     @handler("CHECK_VALUE")
     def _handle_check(self, connection, value, args, request_id):
-        try:
-            port = int(connection)
-        except (TypeError, ValueError):
+        port, err = self._parse_port(connection, request_id)
+        if err is not None:
+            return err
+        st = self._outer.state.get_status(port)
+        setpoint = st.get("setpoint", None)
+        # Review I4 2026-05-23: 0.0 / missing / sub-minimum setpoints
+        # mean the port has never been programmed. Return
+        # UNKNOWN_CONNECTION so BLACS surfaces a real diagnostic
+        # instead of writing 0.0 THz to a real laser.
+        if setpoint is None or float(setpoint) < MIN_VALID_SETPOINT_THZ:
             return encode_reply(
                 status="UNKNOWN_CONNECTION", request_id=request_id,
                 error={
-                    "code": "unknown_connection",
-                    "message": f"connection must be a port-integer string; got {connection!r}",
-                    "retryable": False,
+                    "code": "setpoint_not_initialized",
+                    "message": (f"ch{port} has no valid setpoint yet "
+                                f"(< {MIN_VALID_SETPOINT_THZ} THz minimum)"),
+                    "retryable": True,
                 },
             )
-        st = self._outer.state.get_status(port)
         return encode_reply(status="SUCCESS", request_id=request_id,
-                            value=float(st.get("setpoint", 0.0)))
+                            value=float(setpoint))
 
 
 class ZMQRepWorker(QThread):

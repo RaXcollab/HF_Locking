@@ -218,3 +218,88 @@ def test_H7_unknown_action_returns_unknown_action(make_v2_pair):
 
     assert reply["status"] == "ERROR"
     assert reply["error"]["code"] == "unknown_action"
+
+
+# Review I3 2026-05-23: port range validation.
+
+def test_H7_program_value_port_out_of_range_rejected(make_v2_pair):
+    """Port 0 / 9+ -> UNKNOWN_CONNECTION + code=port_out_of_range."""
+    outer, client_t, v2_server = make_v2_pair()
+
+    for bad_port in (0, 9, -1, 99):
+        reply = _roundtrip(client_t, v2_server, {
+            "v": 2, "id": 14, "action": "PROGRAM_VALUE",
+            "connection": str(bad_port), "value": 100.0,
+        })
+        assert reply["status"] == "UNKNOWN_CONNECTION", (
+            f"port={bad_port} should be rejected: {reply}")
+        assert reply["error"]["code"] == "port_out_of_range"
+    # No setpoint signal must have fired for any bad port.
+    outer.request_setpoint_write.emit.assert_not_called()
+
+
+# Review C2 2026-05-23: lock-bypass warning when wait=True but
+# AND-gate (lock_enabled + deviation_mode) not met.
+
+def test_H7_wait_for_lock_with_lock_off_logs_warning_and_writes(make_v2_pair):
+    """lock_enabled=False, dev_mode=True, wait=True -> SUCCESS without
+    blocking, but log_message warns about the silent lock-bypass."""
+    outer, client_t, v2_server = make_v2_pair(
+        lock_enabled=False, deviation_mode=True)
+
+    reply = _roundtrip(client_t, v2_server, {
+        "v": 2, "id": 15, "action": "PROGRAM_VALUE",
+        "connection": "4", "value": 348.0,
+        "args": {"wait_for_lock": True},
+    })
+
+    assert reply["status"] == "SUCCESS"
+    outer._wait_for_lock.assert_not_called()
+    # The setpoint write DID fire (lab state changed) -- the WARNING
+    # surfaces this in BLACS.log so the operator sees the gap.
+    outer.request_setpoint_write.emit.assert_called_once_with(4, 348.0)
+    warning_msgs = [
+        c.args[0] for c in outer.log_message.emit.call_args_list
+        if "WARNING" in c.args[0]
+    ]
+    assert warning_msgs, "expected a WARNING log for the lock-bypass"
+
+
+def test_H7_wait_for_lock_with_dev_mode_off_logs_warning_and_writes(
+        make_v2_pair):
+    """lock_enabled=True, dev_mode=False, wait=True -> SUCCESS + warning."""
+    outer, client_t, v2_server = make_v2_pair(
+        lock_enabled=True, deviation_mode=False)
+
+    _roundtrip(client_t, v2_server, {
+        "v": 2, "id": 16, "action": "PROGRAM_VALUE",
+        "connection": "4", "value": 348.0,
+        "args": {"wait_for_lock": True},
+    })
+
+    outer._wait_for_lock.assert_not_called()
+    outer.request_setpoint_write.emit.assert_called_once_with(4, 348.0)
+    warning_msgs = [
+        c.args[0] for c in outer.log_message.emit.call_args_list
+        if "WARNING" in c.args[0]
+    ]
+    assert warning_msgs, "expected a WARNING log for the lock-bypass"
+
+
+# Review I4 2026-05-23: CHECK_VALUE on uninitialized port -> UNKNOWN_CONNECTION.
+
+def test_H7_check_value_uninitialized_port_returns_UNKNOWN(make_v2_pair):
+    """CHECK_VALUE on a port with no setpoint (default 0.0) MUST NOT
+    return 0.0 -- BLACS would write 0.0 THz to a laser. Return
+    UNKNOWN_CONNECTION/setpoint_not_initialized instead."""
+    # Default factory: no setpoint_seed, so all ports stay at 0.0.
+    outer, client_t, v2_server = make_v2_pair()
+
+    reply = _roundtrip(client_t, v2_server, {
+        "v": 2, "id": 17, "action": "CHECK_VALUE",
+        "connection": "4",
+    })
+
+    assert reply["status"] == "UNKNOWN_CONNECTION"
+    assert reply["error"]["code"] == "setpoint_not_initialized"
+    assert reply["error"]["retryable"] is True
