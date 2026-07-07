@@ -590,8 +590,11 @@ class _LaserLockV2Server(RemoteControlServerBase):
         self._outer.request_setpoint_write.emit(port, target)
 
         # Q2 §10-resolved: per-request extras live in `args`.
-        # Default to instance setting if absent.
-        wait = bool(args.get("wait_for_lock", self._outer.wait_for_lock))
+        # Absent => False. The v2 BLACS client always sends the key
+        # explicitly (2026-07-07); never fall back to the instance flag
+        # for the wait decision -- absence-default True inverted manual
+        # programming into a 60 s lock wait (found 2026-07-02).
+        wait = bool(args.get("wait_for_lock", False))
 
         st = self._outer.state.get_status(port)
         gl = self._outer.state.get_globals()

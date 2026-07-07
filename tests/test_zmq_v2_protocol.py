@@ -303,3 +303,33 @@ def test_H7_check_value_uninitialized_port_returns_UNKNOWN(make_v2_pair):
     assert reply["status"] == "UNKNOWN_CONNECTION"
     assert reply["error"]["code"] == "setpoint_not_initialized"
     assert reply["error"]["retryable"] is True
+
+
+# BLOCKER 2 (2026-07-07): wait_for_lock absence-semantics inversion.
+# The absent `args.wait_for_lock` key used to fall back to the instance
+# default -- which main_wlm.py constructs as True -- so a manual program on
+# a *locked* channel silently lock-waited (5 s client timeout vs 60 s server
+# wait). Absence must mean False regardless of the instance flag.
+
+def test_H8_wait_for_lock_absent_defaults_to_no_wait(make_v2_pair):
+    """PROGRAM_VALUE with NO args key must return SUCCESS immediately and
+    never call _wait_for_lock, even though the outer worker was constructed
+    with wait_for_lock=True (main_wlm.py passes True). Guards against the
+    absence-semantics inversion found 2026-07-02.
+
+    Channel is fully locked (lock_enabled + deviation_mode) so the ONLY
+    thing that can keep this from blocking is absent-key => False. If the
+    server ever falls back to `self._outer.wait_for_lock` (True here), it
+    calls _wait_for_lock and this test fails."""
+    outer, client_t, v2_server = make_v2_pair(
+        lock_enabled=True, deviation_mode=True, wait_for_lock=True,
+        lock_will_succeed=True)
+    assert outer.wait_for_lock is True  # precondition: instance default True
+
+    reply = _roundtrip(client_t, v2_server, {
+        "v": 2, "id": 18, "action": "PROGRAM_VALUE",
+        "connection": "4", "value": 348.686,
+    })  # NO args key -> absence must resolve to False
+
+    assert reply["status"] == "SUCCESS"
+    outer._wait_for_lock.assert_not_called()
