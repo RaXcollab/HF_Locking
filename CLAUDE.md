@@ -136,7 +136,7 @@ Setting registries defined in `config.py` (`PID_DOUBLE_SETTINGS`, `PID_INT_SETTI
 - Signals use `@pyqtSlot` decorators and `QueuedConnection` for cross-thread
 - Setpoint string format: comma decimal separator for DLL (`"348,666410000"`)
 - Console logging: `[CONFIG]`, `[WLM]`, `[ZMQ PUB]`, `[ZMQ REP]` prefixes
-- No unit tests — verification is manual against live hardware
+- Unit tests: `pytest tests -q` in the `guis` env (mock-based — no hardware, no Qt loop, no ZMQ binds; see `tests/conftest.py`). Hardware behavior is still verified manually against the live wavemeter
 
 ## Known TODOs in Code
 
