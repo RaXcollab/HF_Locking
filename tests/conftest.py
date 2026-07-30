@@ -22,6 +22,12 @@ from unittest import mock
 # HF_Locking modules live one level up from tests/.
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+# The v2 protocol tests importorskip("zmq_v2"), so a checkout without the
+# parent's userlib/external_gui_lib/zmq_v2.py exits 0 having tested nothing.
+# ZMQ_V2_REQUIRED=1 (CI, pre-merge gates) makes the absence a collection error.
+if os.environ.get("ZMQ_V2_REQUIRED"):
+    import zmq_v2  # noqa: F401,E402  -- fail loudly, don't skip
+
 
 # ----- environment-gated skip (pytest OR standalone runner) --------------
 

@@ -1,4 +1,7 @@
 # workers.py
+import os
+import sys
+
 from PyQt5.QtCore import QObject, QThread, pyqtSignal, pyqtSlot, QTimer, QMutex, QMutexLocker
 from PyQt5 import QtCore
 import time
@@ -6,6 +9,19 @@ import json
 import zmq
 import wlmConst
 import config
+
+# zmq_v2 protocol foundation lives in the parent labscript-suite repo.
+# This GUI runs in conda env `guis`; inject the path.
+_EXTERNAL_LIB = os.path.normpath(os.path.join(
+    os.path.dirname(os.path.abspath(__file__)),
+    '..', '..', 'userlib', 'external_gui_lib',
+))
+if _EXTERNAL_LIB not in sys.path:
+    sys.path.insert(0, _EXTERNAL_LIB)
+from zmq_v2 import (
+    RemoteControlServerBase, handler, encode_reply,
+    PROTOCOL_VERSION, ZmqRepTransport,
+)
 
 PORTS = list(range(1, 9))
 
@@ -513,6 +529,137 @@ class ZMQPubWorker(QThread):
             pass
 
 
+class _LaserLockV2Server(RemoteControlServerBase):
+    """v2 protocol dispatcher composed inside ZMQRepWorker.
+
+    Wraps a ZmqRepTransport bound by the QThread; `serve_once` blocks
+    up to 50ms on REP, dispatches via @handler-decorated methods.
+
+    Holds a back-reference to the outer ZMQRepWorker for shared state,
+    signal emit, lock-wait logic, and log.
+    """
+
+    # Single-instance server: no `connections` advertisement.
+    # HF connection convention stays bare-integer port-strings ("1"..."8")
+    # per blacs-expert audit 2026-05-23 (Q4 verdict). Documented as a
+    # legacy exception in spec section 4.1.
+    CAPABILITIES = frozenset({"monitors", "heartbeat", "wait_for_lock"})
+
+    def __init__(self, outer, transport):
+        super().__init__("LaserLockGUI", transport)
+        self._outer = outer
+
+    def _parse_port(self, connection, request_id):
+        """Common port-string -> int + range validation. Returns
+        (port, None) on success, (None, error_reply_bytes) on failure.
+
+        Review I3 2026-05-23: PORTS is range(1, 9); accepting port=0
+        or >=9 silently passes through to the DLL with undefined
+        behavior. Reject up-front."""
+        try:
+            port = int(connection)
+        except (TypeError, ValueError):
+            return None, encode_reply(
+                status="UNKNOWN_CONNECTION", request_id=request_id,
+                error={
+                    "code": "unknown_connection",
+                    "message": f"connection must be a port-integer string; got {connection!r}",
+                    "retryable": False,
+                },
+            )
+        if port not in PORTS:
+            return None, encode_reply(
+                status="UNKNOWN_CONNECTION", request_id=request_id,
+                error={
+                    "code": "port_out_of_range",
+                    "message": f"port {port} not in {sorted(PORTS)}",
+                    "retryable": False,
+                },
+            )
+        return port, None
+
+    @handler("PROGRAM_VALUE")
+    def _handle_program(self, connection, value, args, request_id):
+        port, err = self._parse_port(connection, request_id)
+        if err is not None:
+            return err
+        try:
+            target = float(value)
+        except (TypeError, ValueError):
+            return encode_reply(
+                status="ERROR", request_id=request_id,
+                error={
+                    "code": "invalid_value",
+                    "message": f"value must be a number; got {value!r}",
+                    "retryable": False,
+                },
+            )
+
+        # Hand the setpoint write across to WavemeterWorker via signal.
+        self._outer.request_setpoint_write.emit(port, target)
+
+        # Q2 §10-resolved: per-request extras live in `args`.
+        # Absent => False. The v2 BLACS client always sends the key
+        # explicitly (2026-07-07); never fall back to the instance flag
+        # for the wait decision -- absence-default True inverted manual
+        # programming into a 60 s lock wait (found 2026-07-02).
+        wait = bool(args.get("wait_for_lock", False))
+
+        st = self._outer.state.get_status(port)
+        gl = self._outer.state.get_globals()
+        lock_enabled = bool(st.get("lock_enabled", False))
+        dev_mode = bool(gl.get("deviation_mode", False))
+
+        if wait and lock_enabled and dev_mode:
+            self._outer.log_message.emit(
+                f"ZMQ: waiting for lock ch{port} target={target}")
+            ok = self._outer._wait_for_lock(port, target)
+            if ok:
+                return encode_reply(status="SUCCESS", request_id=request_id)
+            return encode_reply(
+                status="TIMEOUT", request_id=request_id,
+                error={
+                    "code": "lock_wait_timeout",
+                    "message": f"timeout waiting for lock on ch{port}",
+                    "retryable": True,
+                },
+            )
+        # Review C2 2026-05-23: if caller asked to wait but the AND-gate
+        # conditions weren't met, log a WARNING so the operator sees the
+        # silent lock-bypass in BLACS.log (the setpoint was still written
+        # via the signal emit above, so the lab state has changed).
+        if wait and not (lock_enabled and dev_mode):
+            self._outer.log_message.emit(
+                f"WARNING: ZMQ wait_for_lock=True ignored for ch{port} "
+                f"(lock_enabled={lock_enabled}, deviation_mode={dev_mode}); "
+                f"setpoint written without waiting for convergence")
+        return encode_reply(status="SUCCESS", request_id=request_id)
+
+    @handler("CHECK_VALUE")
+    def _handle_check(self, connection, value, args, request_id):
+        port, err = self._parse_port(connection, request_id)
+        if err is not None:
+            return err
+        st = self._outer.state.get_status(port)
+        setpoint = st.get("setpoint", None)
+        # Review I4 2026-05-23: 0.0 / missing / sub-minimum setpoints
+        # mean the port has never been programmed. Return
+        # UNKNOWN_CONNECTION so BLACS surfaces a real diagnostic
+        # instead of writing 0.0 THz to a real laser.
+        if setpoint is None or float(setpoint) < MIN_VALID_SETPOINT_THZ:
+            return encode_reply(
+                status="UNKNOWN_CONNECTION", request_id=request_id,
+                error={
+                    "code": "setpoint_not_initialized",
+                    "message": (f"ch{port} has no valid setpoint yet "
+                                f"(< {MIN_VALID_SETPOINT_THZ} THz minimum)"),
+                    "retryable": True,
+                },
+            )
+        return encode_reply(status="SUCCESS", request_id=request_id,
+                            value=float(setpoint))
+
+
 class ZMQRepWorker(QThread):
     request_setpoint_write = pyqtSignal(int, float)
     log_message = pyqtSignal(str)
@@ -529,77 +676,25 @@ class ZMQRepWorker(QThread):
         self.requestInterruption()
 
     def run(self):
-        ctx = zmq.Context()  # per-thread context
-        rep = ctx.socket(zmq.REP)
-        rep.setsockopt(zmq.LINGER, 0)
-
         try:
-            rep.bind(f"tcp://0.0.0.0:{self.req_port}")
+            transport = ZmqRepTransport(
+                f"tcp://0.0.0.0:{self.req_port}", recv_timeout_ms=50)
         except zmq.ZMQError as e:
             self.log_message.emit(f"ZMQ REP bind error: {e}")
             return
 
-        poller = zmq.Poller()
-        poller.register(rep, zmq.POLLIN)
+        v2_server = _LaserLockV2Server(self, transport)
 
         while self._running and not self.isInterruptionRequested():
-            socks = dict(poller.poll(50))  # lets us exit cleanly
-            if rep not in socks:
-                continue
-
             try:
-                msg = rep.recv_string()
-                resp = self._handle_msg(msg)
-                rep.send_string(resp)
+                v2_server.serve_once(timeout_ms=50)
             except Exception as e:
-                try:
-                    rep.send_string(json.dumps({"status": "ERROR", "message": str(e)}))
-                except Exception:
-                    pass
+                self.log_message.emit(f"ZMQ dispatch error: {e}")
 
         try:
-            rep.close()
-            ctx.term()
+            transport.close()
         except Exception:
             pass
-
-    def _handle_msg(self, msg: str) -> str:
-        d = json.loads(msg)
-        action = d.get("action")
-
-        if action == "HELLO":
-            return json.dumps({"status": "SUCCESS"})
-
-        if action == "CHECK_VALUE":
-            p = int(d["connection"])
-            st = self.state.get_status(p)
-            return json.dumps({"status": "SUCCESS", "value": st.get("setpoint", 0.0)})
-
-        if action == "PROGRAM_VALUE":
-            p = int(d["connection"])
-            target = float(d["value"])
-
-            self.request_setpoint_write.emit(p, target)
-
-            # Let the client opt in/out of lock-wait; default to instance setting.
-            # Manual-mode clients send wait_for_lock=False for immediate return.
-            # Buffered-shot clients send wait_for_lock=True to block until converged.
-            wait = d.get("wait_for_lock", self.wait_for_lock)
-
-            st = self.state.get_status(p)
-            gl = self.state.get_globals()
-            lock_enabled = bool(st.get("lock_enabled", False))
-            dev_mode = bool(gl.get("deviation_mode", False))
-
-            if wait and lock_enabled and dev_mode:
-                self.log_message.emit(f"ZMQ: waiting for lock ch{p} target={target}")
-                ok = self._wait_for_lock(p, target)
-                return json.dumps({"status": "SUCCESS" if ok else "ERROR",
-                                   "message": "" if ok else "Timeout waiting for lock"})
-            else:
-                return json.dumps({"status": "SUCCESS"})
-
-        return json.dumps({"status": "ERROR", "message": "Unknown action"})
 
     def _wait_for_lock(self, port: int, target: float) -> bool:
         t0 = time.perf_counter()
