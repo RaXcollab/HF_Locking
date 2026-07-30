@@ -56,15 +56,17 @@ PyQt5 GUI controlling a **High Finesse WS7-30** wavemeter via `wlmData.dll` (cty
 
 ```python
 CHANNEL_NAMES = {
-    1: "Ch_1",    2: "Ch_2",    3: "Vexlum",  4: "TiSa_1",
+    1: "TiSa_1",  2: "Ch_2",    3: "Vexlum",  4: "Ch_4",
     5: "Ch_5",    6: "Ch_6",    7: "Ch7",      8: "Rb_Ref",
 }
+# TiSa_1 moved ch4 -> ch1 on 2026-07-29 (crosstalk). Channel-move checklist:
+# ~/labscript-suite/docs/wavemeter-channel-move.md
 PORTS = range(1, 9)
 ```
 
 ## BLACS Integration
 
-- **Matisse channels (port 4 TiSa_1, port 6 TiSa-2):** remote freq control is via the Matisse **Network Server SCPI** (`SCAN:NOW`/`REFERENCECELL:NOW`, LabVIEW length-prefixed framing) — **NOT UI automation** (LabVIEW canvas exposes 0 UIA/Win32 controls). Probe: `tools/matisse_scpi_probe.py`. Findings + unverified list: `docs/matisse-c-external-locking.md` (2026-07-15).
+- **Matisse channels (port 1 TiSa_1 — was port 4 until 2026-07-29 — and port 6 TiSa-2):** remote freq control is via the Matisse **Network Server SCPI** (`SCAN:NOW`/`REFERENCECELL:NOW`, LabVIEW length-prefixed framing) — **NOT UI automation** (LabVIEW canvas exposes 0 UIA/Win32 controls). Probe: `tools/matisse_scpi_probe.py`. Findings + unverified list: `docs/matisse-c-external-locking.md` (2026-07-15).
 
 ### ZMQ Protocol
 
@@ -100,7 +102,7 @@ PORTS = range(1, 9)
 - Pending guard (display.py) is a **non-issue** for remote writes — only triggers on local "Set F" clicks
 - Status delta merge is a **non-issue** — SharedState updated before signal emit
 - Lock-wait timing: 100ms poll absorbs ~1ms queued signal latency — first poll sees new setpoint
-- `LOCK_CONSECUTIVE` requires **5** consecutive in-tol readings (per `workers.py:25`; tol default `LOCK_TOLERANCE=5e-6 THz = 5 MHz`, per-channel overrides in `LOCK_TOLERANCE_BY_PORT` — TiSa_1 ch4 = 1e-6 THz = 1 MHz, resolved via `lock_tolerance(port)`; timeout `LOCK_TIMEOUT_S=60`)
+- `LOCK_CONSECUTIVE` requires **5** consecutive in-tol readings (per `workers.py:25`; tol default `LOCK_TOLERANCE=5e-6 THz = 5 MHz`, per-channel overrides in `LOCK_TOLERANCE_BY_PORT` — TiSa_1 ch1 = 1e-6 THz = 1 MHz, resolved via `lock_tolerance(port)`; timeout `LOCK_TIMEOUT_S=60`)
 - Silent rejection of setpoints < 1.0 THz is low-risk — BLACS spinbox limits enforce valid ranges
 
 ## PID Config Persistence

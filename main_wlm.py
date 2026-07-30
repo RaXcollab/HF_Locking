@@ -57,10 +57,10 @@ else:
     print(f"[POWER] Failed to disable power throttling (error {_err})")
 
 CHANNEL_NAMES = {
-    1: "Ch_1", 
-    2: "Ch_2", 
-    3: "Vexlum", 
-    4: "TiSa_1",
+    1: "TiSa_1",  # moved from ch4 2026-07-29 (crosstalk)
+    2: "Ch_2",
+    3: "Vexlum",
+    4: "Ch_4",
     5: "Ch_5", 
     6: "Ch_6", 
     7: "Ch7", 

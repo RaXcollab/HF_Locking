@@ -38,12 +38,13 @@ def test_H1_lock_constants_pinned():
     assert w.LOCK_TOLERANCE == 5e-6, (
         "LOCK_TOLERANCE drifted from 5e-6 THz (5 MHz); got " + str(w.LOCK_TOLERANCE)
     )
-    assert w.LOCK_TOLERANCE_BY_PORT == {4: 1e-6}, (
-        "per-channel tolerance overrides drifted; TiSa_1 (ch4) is pinned at "
-        "1e-6 THz (1 MHz); got " + str(w.LOCK_TOLERANCE_BY_PORT)
+    assert w.LOCK_TOLERANCE_BY_PORT == {1: 1e-6}, (
+        "per-channel tolerance overrides drifted; TiSa_1 (ch1 since "
+        "2026-07-29) is pinned at 1e-6 THz (1 MHz); got "
+        + str(w.LOCK_TOLERANCE_BY_PORT)
     )
-    assert w.lock_tolerance(4) == 1e-6 and w.lock_tolerance(1) == 5e-6, (
-        "lock_tolerance() must resolve overrides for ch4 and default elsewhere"
+    assert w.lock_tolerance(1) == 1e-6 and w.lock_tolerance(4) == 5e-6, (
+        "lock_tolerance() must resolve overrides for ch1 and default elsewhere"
     )
     assert w.LOCK_TIMEOUT_S == 60.0, (
         "LOCK_TIMEOUT_S drifted from 60s (BLACS uses 120s PROGRAM_TIMEOUT_MS "
@@ -69,7 +70,9 @@ def test_H2_requires_five_consecutive_in_tol():
     target = 348.666410
 
     # Sequence: 4 in-tol, 1 out, 4 in-tol (9 samples total, never 5 in a row).
-    in_tol = target + 1e-6   # 1 MHz inside 5 MHz tol
+    # 0.2 MHz offset is inside EVERY channel's tolerance (port 1 carries the
+    # 1 MHz TiSa_1 override; 1e-6 here would sit exactly on that edge).
+    in_tol = target + 2e-7   # 0.2 MHz inside any tol
     out_tol = target + 1e-5  # 10 MHz outside
     sequence = [in_tol] * 4 + [out_tol] + [in_tol] * 4
 
@@ -106,10 +109,11 @@ def test_H2_requires_five_consecutive_in_tol():
 
 # H2b ---------------------------------------------------------------------
 
-def test_H2b_tisa1_port4_locks_at_1mhz_not_5mhz():
-    """TiSa_1 (port 4) uses the tighter 1 MHz tolerance in `_wait_for_lock`:
-    a sample 2 MHz off setpoint (inside the 5 MHz default, outside TiSa_1's
-    1 MHz) must NOT lock on port 4 but MUST lock on a default port."""
+def test_H2b_tisa1_port1_locks_at_1mhz_not_5mhz():
+    """TiSa_1 (port 1 since 2026-07-29) uses the tighter 1 MHz tolerance in
+    `_wait_for_lock`: a sample 2 MHz off setpoint (inside the 5 MHz default,
+    outside TiSa_1's 1 MHz) must NOT lock on port 1 but MUST lock on a
+    default port."""
     w, wc = require_workers()
     target = 348.666410
 
@@ -132,13 +136,13 @@ def test_H2b_tisa1_port4_locks_at_1mhz_not_5mhz():
         with mock.patch.object(time, "sleep", side_effect=fake_sleep):
             return w.ZMQRepWorker._wait_for_lock(self_, port, target)
 
-    assert run(4, 2e-6) is False, (
-        "2 MHz off setpoint must NOT lock on TiSa_1 (ch4 tol is 1 MHz)"
+    assert run(1, 2e-6) is False, (
+        "2 MHz off setpoint must NOT lock on TiSa_1 (ch1 tol is 1 MHz)"
     )
-    assert run(4, 0.5e-6) is True, (
+    assert run(1, 0.5e-6) is True, (
         "0.5 MHz off setpoint must lock on TiSa_1 (inside 1 MHz tol)"
     )
-    assert run(1, 4e-6) is True, (
+    assert run(4, 4e-6) is True, (
         "4 MHz off setpoint must still lock on default channels (5 MHz tol)"
     )
 

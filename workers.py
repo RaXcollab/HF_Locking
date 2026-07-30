@@ -19,7 +19,7 @@ ZMQ_PUB_PORT = 3797
 PUB_PERIOD_S = 0.1            # 10 Hz
 LOCK_TOLERANCE = 0.000005     # THz — default for all channels
 LOCK_TOLERANCE_BY_PORT = {    # per-channel overrides (port -> THz)
-    4: 0.000001,              # TiSa_1: 1 MHz
+    1: 0.000001,              # TiSa_1: 1 MHz (moved from ch4 2026-07-29)
 }
 LOCK_TIMEOUT_S = 60.0
 LOCK_CONSECUTIVE = 5
