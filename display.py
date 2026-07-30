@@ -6,7 +6,7 @@ import math
 import time
 import numpy as np  # kept for display_wide compatibility; not used in hot paths
 
-LOCK_TOL = 0.000005  # THz
+from workers import lock_tolerance  # per-channel lock tolerance (THz)
 
 # Voltage plot padding: fraction of data range added above/below
 VOLT_PAD_FRAC = 0.15
@@ -435,7 +435,7 @@ class ChannelControl(QtWidgets.QWidget):
 
         # Derived lock_status (arming state + global deviation mode + within tolerance)
         if valid and (f_disp is not None):
-            in_tol = abs(float(f_disp) - float(self._setpoint)) < LOCK_TOL
+            in_tol = abs(float(f_disp) - float(self._setpoint)) < lock_tolerance(self.port)
             locked = bool(self._lock_enabled and self._global_deviation_mode and in_tol)
         else:
             locked = False
@@ -468,7 +468,7 @@ class ChannelControl(QtWidgets.QWidget):
 
             # Position setpoint + tolerance lines in MHz offset units
             self._sp_mhz = self._thz_to_mhz_offset(sp)
-            tol_mhz = LOCK_TOL * 1.0e6  # 5 MHz for 0.000005 THz
+            tol_mhz = lock_tolerance(self.port) * 1.0e6  # THz -> MHz
             self.line_setpoint.setPos(self._sp_mhz)
             self.line_tol_up.setPos(self._sp_mhz + tol_mhz)
             self.line_tol_dn.setPos(self._sp_mhz - tol_mhz)

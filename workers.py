@@ -33,10 +33,19 @@ INTERVAL_POLL_SLOW_MS = 1000   # Status/globals: setpoints, bounds, T, P (slow-c
 ZMQ_REQ_PORT = 3796
 ZMQ_PUB_PORT = 3797
 PUB_PERIOD_S = 0.1            # 10 Hz
-LOCK_TOLERANCE = 0.000005     # THz
+LOCK_TOLERANCE = 0.000005     # THz — default for all channels
+LOCK_TOLERANCE_BY_PORT = {    # per-channel overrides (port -> THz)
+    1: 0.000001,              # TiSa_1: 1 MHz (moved from ch4 2026-07-29)
+}
 LOCK_TIMEOUT_S = 60.0
 LOCK_CONSECUTIVE = 5
 MIN_VALID_SETPOINT_THZ = 1.0  # reject bogus setpoints (e.g. 0 from remote init)
+
+
+def lock_tolerance(port: int) -> float:
+    """Lock tolerance in THz for a channel. Single source of truth —
+    display.py imports this for the lock indicator and plot tolerance lines."""
+    return LOCK_TOLERANCE_BY_PORT.get(port, LOCK_TOLERANCE)
 
 # If you haven't removed the print() inside wlm_utils.get_pid_course_num(),
 # enabling this will avoid console spam without touching wlm_utils.py.
@@ -690,6 +699,7 @@ class ZMQRepWorker(QThread):
     def _wait_for_lock(self, port: int, target: float) -> bool:
         t0 = time.perf_counter()
         consecutive = 0
+        tol = lock_tolerance(port)
 
         while time.perf_counter() - t0 < LOCK_TIMEOUT_S:
             if self.isInterruptionRequested() or not self._running:
@@ -712,7 +722,7 @@ class ZMQRepWorker(QThread):
                 continue
 
             try:
-                if abs(float(f) - target) < LOCK_TOLERANCE:
+                if abs(float(f) - target) < tol:
                     consecutive += 1
                     if consecutive >= LOCK_CONSECUTIVE:
                         self.log_message.emit(f"ZMQ: lock achieved ch{port}")

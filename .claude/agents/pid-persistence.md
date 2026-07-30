@@ -117,13 +117,13 @@ Functions needed:
 
 **Channel 3 (Vexlum):** Signal=3, Unit=0 (nm), P=0.16, I=0.84, D=0.034, Sensitivity=-3, Polarity=1, Bounds=-10000/9999.69, Course=632.99 nm (HeNe default — setpoint was set via DLL only, NOT in INI)
 
-**Channel 4 (TiSa_1):** Signal=0, Unit=2 (THz), P=0.16, I=0.84, D=0.034, Sensitivity=-2, Polarity=-1 (inverted), Bounds=-10000/9999.69, Course=348.666410 THz
+**Channel 1 (TiSa_1 — moved from ch4 on 2026-07-29 to avoid crosstalk):** values below recorded in the ch4 era: Signal=0, Unit=2 (THz), P=0.16, I=0.84, D=0.034, Sensitivity=-2, Polarity=-1 (inverted), Bounds=-10000/9999.69, Course=348.666410 THz. Live tuning has since drifted (pid_config.json 2026-07-29: P=0.19, I=0.9, Bounds 0/9000, Setpoint 348.661135) — trust pid_config.json over this snapshot.
 
 Note: PID gains above are factory defaults from the INI. User confirms gains WERE custom — they were lost because the WS7 app didn't persist DLL-set values.
 
 ## BLACS Setpoint History (from h5 archives)
 
-| Date | TiSa_1 (ch4) | Vexlum (ch3) |
+| Date | TiSa_1 (ch4 at the time) | Vexlum (ch3) |
 |---|---|---|
 | Feb 2 | 348.666415 THz | 420.89965 THz |
 | Feb 20 | 348.666408 THz | 420.899795 THz |
