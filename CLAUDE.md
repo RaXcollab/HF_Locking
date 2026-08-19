@@ -122,7 +122,7 @@ enum/`error.{code,message,retryable}` — see canonical spec
 - Pending guard (display.py) is a **non-issue** for remote writes — only triggers on local "Set F" clicks
 - Status delta merge is a **non-issue** — SharedState updated before signal emit
 - Lock-wait timing: 100ms poll absorbs ~1ms queued signal latency — first poll sees new setpoint
-- `LOCK_CONSECUTIVE` requires **5** consecutive in-tol readings (per `workers.py:25`; tol default `LOCK_TOLERANCE=5e-6 THz = 5 MHz`, per-channel overrides in `LOCK_TOLERANCE_BY_PORT` — TiSa_1 ch1 = 1e-6 THz = 1 MHz, resolved via `lock_tolerance(port)`; timeout `LOCK_TIMEOUT_S=60`)
+- `LOCK_CONSECUTIVE` requires **5** consecutive in-tol readings (per `LOCK_CONSECUTIVE` in `workers.py`; tol default `LOCK_TOLERANCE=5e-6 THz = 5 MHz`, per-channel overrides in `LOCK_TOLERANCE_BY_PORT` — TiSa_1 ch1 = 1e-6 THz = 1 MHz, resolved via `lock_tolerance(port)`; timeout `LOCK_TIMEOUT_S=60`)
 - Silent rejection of setpoints < 1.0 THz is low-risk — BLACS spinbox limits enforce valid ranges
 
 ## PID Config Persistence
