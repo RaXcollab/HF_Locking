@@ -207,7 +207,8 @@ class ExperimentController(QtWidgets.QMainWindow):
         # Worker thread + QObject worker
         self.thread_wlm = QtCore.QThread(self)
         self.worker_wlm = workers.WavemeterWorker(self.wlm, self.shared)
-        self.worker_wlm.moveToThread(self.thread_wlm)
+        # moveToThread + started->start_polling + finished->quit (DIRECT; see helper)
+        workers.bind_worker_thread(self.worker_wlm, self.thread_wlm, self.worker_wlm.start_polling)
 
         # ZMQ Workers
         self.zmq_pub = workers.ZMQPubWorker(self.shared, pub_port=3797)
@@ -259,7 +260,6 @@ class ExperimentController(QtWidgets.QMainWindow):
             vbox.addWidget(self.cd_panel)
 
         # Worker -> UI: only write-handler feedback (infrequent, no backlog risk)
-        self.thread_wlm.started.connect(self.worker_wlm.start_polling)
         self.worker_wlm.status_updated.connect(self.handle_slow_update)
         self.worker_wlm.globals_updated.connect(self.handle_globals_update)
         self.worker_wlm.config_saved.connect(self._on_config_saved)
@@ -288,9 +288,6 @@ class ExperimentController(QtWidgets.QMainWindow):
 
         # ZMQ -> Worker command (also cross-thread)
         self.zmq_rep.request_setpoint_write.connect(self.worker_wlm.handle_setpoint_write, QtCore.Qt.QueuedConnection)
-
-        # Safer shutdown sequencing: stop worker, then quit thread
-        self.worker_wlm.finished.connect(self.thread_wlm.quit)
 
         # Config restore (before starting worker — no DLL concurrency)
         self._try_restore_config()
@@ -502,18 +499,23 @@ class ExperimentController(QtWidgets.QMainWindow):
                 print(f"[MATISSE] WARNING: stop failed: {e}")
 
         # Stop WLM worker + thread
+        wlm_stopped = False
         try:
-            QtCore.QMetaObject.invokeMethod(self.worker_wlm, "stop", QtCore.Qt.QueuedConnection)
-            self.thread_wlm.wait(1000)
-        except Exception:
-            pass
-
-        # Save config (worker stopped — safe to call DLL from main thread)
-        try:
-            config.save_config(self.wlm, PORTS)
-            print("[CONFIG] Config saved on exit.")
+            wlm_stopped = workers.stop_worker_thread(self.worker_wlm, self.thread_wlm, 2000)
         except Exception as e:
-            print(f"[CONFIG] WARNING: Failed to save config on exit: {e}")
+            print(f"[WLM] WARNING: worker stop failed: {e}")
+
+        # Save config -- only once the worker thread has finished; otherwise
+        # GUI-thread DLL calls could interleave with the worker's (DLL rule).
+        if wlm_stopped:
+            try:
+                config.save_config(self.wlm, PORTS)
+                print("[CONFIG] Config saved on exit.")
+            except Exception as e:
+                print(f"[CONFIG] WARNING: Failed to save config on exit: {e}")
+        else:
+            print("[CONFIG] WARNING: WLM worker still running -- config NOT saved on exit "
+                  "(use 'Save Config' next time before closing).")
 
         event.accept()
 

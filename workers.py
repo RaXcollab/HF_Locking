@@ -47,6 +47,25 @@ def lock_tolerance(port: int) -> float:
     display.py imports this for the lock indicator and plot tolerance lines."""
     return LOCK_TOLERANCE_BY_PORT.get(port, LOCK_TOLERANCE)
 
+def bind_worker_thread(worker, thread, start_slot):
+    """Move `worker` onto `thread`, start `start_slot` when the thread starts,
+    and quit the thread when the worker emits `finished`.
+
+    finished->quit MUST be a DirectConnection: the QThread object lives on
+    the GUI thread, so an auto connection is queued there -- and at shutdown
+    the GUI thread is blocked in thread.wait(), so quit() never runs and the
+    wait always times out. QThread.quit() is thread-safe."""
+    worker.moveToThread(thread)
+    thread.started.connect(start_slot)
+    worker.finished.connect(thread.quit, QtCore.Qt.DirectConnection)
+
+
+def stop_worker_thread(worker, thread, timeout_ms: int) -> bool:
+    """Queue worker.stop() and wait for the thread. True if it finished."""
+    QtCore.QMetaObject.invokeMethod(worker, "stop", QtCore.Qt.QueuedConnection)
+    return bool(thread.wait(int(timeout_ms)))
+
+
 # If you haven't removed the print() inside wlm_utils.get_pid_course_num(),
 # enabling this will avoid console spam without touching wlm_utils.py.
 SUPPRESS_SETPOINT_READ_STDOUT = False

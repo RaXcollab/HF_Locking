@@ -21,6 +21,11 @@ PyQt5 GUI controlling a **High Finesse WS7-30** wavemeter via `wlmData.dll` (cty
 | ZMQPubWorker | Publishes measurements (port 3797) | NO — reads SharedState |
 | MatisseCDWorker ×N | One QThread per Matisse (`MatisseCDGroup`), TCP to Matisse Commander, optional | NO — signals `request_hf_lock` to Worker |
 
+**Worker threads** are bound with `workers.bind_worker_thread` (finished->quit is a
+DirectConnection -- a queued quit deadlocks against the GUI thread blocked in
+`wait()`) and stopped with `workers.stop_worker_thread`; `closeEvent` skips the
+exit config save if the WLM thread did not finish (test: `tests/test_wlm_thread_shutdown.py`).
+
 **DLL Thread Safety Rule:** `wlm_link` has NO mutex. The WavemeterWorker thread owns all DLL calls during runtime. Main thread DLL access is ONLY safe when the worker is not running (before `thread_wlm.start()` at startup, after `thread_wlm.wait()` at shutdown). Any new feature requiring DLL access during runtime MUST route through the worker thread via `QueuedConnection` signal. Violating this will corrupt data — the DLL may interleave calls across ports.
 
 ### Data Flow
@@ -108,6 +113,11 @@ turns the whole feature off. Front end is THz everywhere; nm only on the MC wire
   ChannelControl + `wire_into_hf`, written test-first; I1-I3/W1-W2 verified
   RED against pre-CD `workers.py`/`display.py`), I4 in `test_zmq_v2_protocol.py`.
   Wiring lives in `matisse_cd.wire_into_hf` (all QueuedConnection) -- extend there.
+- **Lab bring-up:** `tools/matisse_cd_bringup.py` -- A (read-only: vacuum/air/
+  wrong-channel check), B `--go` (activate at current f, one step + back: proves
+  the decimal separator), C `--go` (settle times per step -> tune `runaway_s`,
+  `LOCK_TIMEOUT_S`; hold std). Runaway/no-signal guards; CD always switched OFF at
+  exit. Logic pinned against a simulated laser in `tests/test_matisse_cd_bringup.py`.
 - Wire: LabVIEW length-prefixed framing + `#SERVER ` prefix (from a
   collaborator's `matisse_cd_controller.py`). Probe: `python matisse_cd.py --probe host port`.
 - **UNVERIFIED on our hardware:** CD setpoint is vacuum nm; LabVIEW decimal
