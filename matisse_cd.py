@@ -36,7 +36,11 @@ UNVERIFIED on our hardware (see CLAUDE.md "Matisse CounterDrift"):
     HF measurement and refuses on mismatch, which catches air/vacuum
     (~2.7e-4 relative) and wrong-channel mapping;
   - decimal separator LabVIEW expects on the lab PC (config "decimal_sep");
-  - whether MCP_WM_GET_WAVELENGTH returns nm and works with the plugin closed.
+  - MCP_WM_GET_WAVELENGTH returns nm (per the collaborator, 2026-09-29; air vs
+    vacuum not stated) -- whether it works with the plugin closed is unknown.
+
+Front end is THz everywhere (Set F, BLACS, panel readout); nm exists only on
+the wire to Matisse Commander.
 
 Standalone read-only probe (no HF_Locking needed):
     python matisse_cd.py --probe 127.0.0.1 30000
@@ -608,8 +612,7 @@ class MatisseCDPanel(QtWidgets.QGroupBox):
             btn_conn.setChecked(True)
             btn_conn.clicked.connect(lambda chk, n=name: self.request_connect.emit(n, bool(chk)))
             lbl_state = QtWidgets.QLabel("--")
-            lbl_wl = QtWidgets.QLabel("MC: -- nm")
-            lbl_wl.setToolTip("Wavelength reported by Matisse Commander, and HF minus MC (MHz)")
+            lbl_wl = QtWidgets.QLabel("MC: -- THz")
             btn_act = QtWidgets.QPushButton("Activate CD")
             btn_act.setCheckable(True)
             btn_act.setMinimumWidth(140)
@@ -643,7 +646,13 @@ class MatisseCDPanel(QtWidgets.QGroupBox):
             w["state"].setToolTip(err)
 
             lam, mism = s.get("wavelength_nm"), s.get("mismatch_mhz")
-            wl_txt = "MC: -- nm" if lam is None else f"MC: {lam:.6f} nm"
+            if lam is None or lam <= 0:
+                wl_txt = "MC: -- THz"
+                w["wl"].setToolTip("Matisse Commander's wavemeter reading (THz), and HF minus MC (MHz)")
+            else:
+                wl_txt = f"MC: {thz_to_nm(lam):.6f} THz"   # c/x is its own inverse
+                w["wl"].setToolTip(f"Matisse Commander reports {lam:.6f} nm (vacuum assumed); "
+                                   f"HF minus MC in MHz. Setpoints are sent to CounterDrift as nm.")
             if mism is not None:
                 wl_txt += f"  (HF-MC {mism:+.0f} MHz)"
             if err:

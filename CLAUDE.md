@@ -76,7 +76,7 @@ Alternative to the analog WS7-PID -> Matisse feedback: Matisse Commander's
 wavemeter plugin (CounterDrift) holds the laser; HF_Locking only moves its
 setpoint. Toggle per laser in the "Matisse CounterDrift" panel; the HF channel
 of each TiSa is user-set there (persisted). `ENABLE_MATISSE_CD` in `main_wlm.py`
-turns the whole feature off.
+turns the whole feature off. Front end is THz everywhere; nm only on the MC wire.
 
 - **Setpoint path:** Set F / ZMQ `PROGRAM_VALUE` -> `handle_setpoint_write` (WS7
   course setpoint as before) -> `setpoint_committed(port, THz)` ->
@@ -95,7 +95,8 @@ turns the whole feature off.
 - Wire: LabVIEW length-prefixed framing + `#SERVER ` prefix (from a
   collaborator's `matisse_cd_controller.py`). Probe: `python matisse_cd.py --probe host port`.
 - **UNVERIFIED on our hardware:** CD setpoint is vacuum nm; LabVIEW decimal
-  separator (`decimal_sep`); `MCP_WM_GET_WAVELENGTH` unit/behavior; TiSa-2 MC
+  separator (`decimal_sep`); `MCP_WM_GET_WAVELENGTH` returns nm per collaborator
+  (air/vac unstated; behavior with plugin closed unknown); TiSa-2 MC
   server port (default 30001); CD loop bandwidth/capture range vs analog PID.
 
 ### ZMQ Protocol
