@@ -83,6 +83,7 @@ class SharedExperimentState:
                 "setpoint": 0.0,
                 "bound_min": 0.0,
                 "bound_max": 0.0,
+                "cd_active": False,     # Matisse CounterDrift owns this port (matisse_cd.py)
                 "lock_enabled": False,  # software ÃƒÂ¢Ã¢â€šÂ¬Ã…â€œarmedÃƒÂ¢Ã¢â€šÂ¬Ã‚Â state (not lock_status)
             }
             for p in PORTS
@@ -164,6 +165,10 @@ class WavemeterWorker(QObject):
     config_saved = pyqtSignal(bool, str)
     wlm_backup_done = pyqtSignal(bool, str)
 
+    # Setpoint written + read back (port, THz). Consumed by the optional
+    # Matisse CounterDrift worker to forward local/ZMQ setpoints.
+    setpoint_committed = pyqtSignal(int, float)
+
     finished = pyqtSignal()
 
     # ÃƒÂ¢Ã¢â€šÂ¬Ã…â€œHard invalidÃƒÂ¢Ã¢â€šÂ¬Ã‚Â codes (errors)
@@ -196,6 +201,7 @@ class WavemeterWorker(QObject):
         self._timer_fast = None
         self._timer_slow = None
         self._wlm_active = True  # assume active; _poll_slow will verify
+        self._fight_warned = set()  # ports warned for HF lock + CounterDrift both on
 
     @pyqtSlot()
     def start_polling(self):
@@ -271,6 +277,17 @@ class WavemeterWorker(QObject):
         # Read actual lock (deviation channel assignment) from WLM hardware
         lock_hw = self.wlm.get_channel_assignment(port)
         self._lock_enabled[port] = lock_hw
+
+        # HF lock re-armed outside HF_Locking (e.g. WLM native app) while
+        # Matisse CounterDrift also drives this laser: two loops fight.
+        if lock_hw and self.state.get_status(port).get("cd_active", False):
+            if port not in self._fight_warned:
+                self._fight_warned.add(port)
+                self.log_message.emit(
+                    f"WARNING: ch{port} WS7 PID lock is ON while Matisse CounterDrift "
+                    f"is active -- two loops are fighting. Disable one.")
+        else:
+            self._fight_warned.discard(port)
 
         s_full = {
             "use": bool(use_val),
@@ -386,6 +403,7 @@ class WavemeterWorker(QObject):
             delta = {"setpoint": float(sp)}
             self.state.update_status(port, delta)
             self.status_updated.emit(port, delta)
+            self.setpoint_committed.emit(port, float(sp))
         except Exception as e:
             self.log_message.emit(f"Setpoint readback ch{port} failed: {e}")
 
@@ -421,6 +439,14 @@ class WavemeterWorker(QObject):
 
     @pyqtSlot(int, bool)
     def handle_lock_toggle(self, port: int, enabled: bool):
+        if enabled and self.state.get_status(port).get("cd_active", False):
+            self.log_message.emit(
+                f"Lock enable ch{port} REJECTED: Matisse CounterDrift is active on "
+                f"this channel. Deactivate CD first.")
+            delta = {"lock_enabled": bool(self._lock_enabled[port])}
+            self.state.update_status(port, delta)
+            self.status_updated.emit(port, delta)
+            return
         # This is the ÃƒÂ¢Ã¢â€šÂ¬Ã…â€œarmingÃƒÂ¢Ã¢â€šÂ¬Ã‚Â state, not lock_status.
         self.wlm.set_channel_assignment(port, enabled)
         self._lock_enabled[port] = bool(enabled)
@@ -609,8 +635,10 @@ class _LaserLockV2Server(RemoteControlServerBase):
         gl = self._outer.state.get_globals()
         lock_enabled = bool(st.get("lock_enabled", False))
         dev_mode = bool(gl.get("deviation_mode", False))
+        cd_active = bool(st.get("cd_active", False))
+        locking = (lock_enabled and dev_mode) or cd_active
 
-        if wait and lock_enabled and dev_mode:
+        if wait and locking:
             self._outer.log_message.emit(
                 f"ZMQ: waiting for lock ch{port} target={target}")
             ok = self._outer._wait_for_lock(port, target)
@@ -628,10 +656,11 @@ class _LaserLockV2Server(RemoteControlServerBase):
         # conditions weren't met, log a WARNING so the operator sees the
         # silent lock-bypass in BLACS.log (the setpoint was still written
         # via the signal emit above, so the lab state has changed).
-        if wait and not (lock_enabled and dev_mode):
+        if wait and not locking:
             self._outer.log_message.emit(
                 f"WARNING: ZMQ wait_for_lock=True ignored for ch{port} "
-                f"(lock_enabled={lock_enabled}, deviation_mode={dev_mode}); "
+                f"(lock_enabled={lock_enabled}, deviation_mode={dev_mode}, "
+                f"cd_active={cd_active}); "
                 f"setpoint written without waiting for convergence")
         return encode_reply(status="SUCCESS", request_id=request_id)
 

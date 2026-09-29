@@ -211,3 +211,6 @@ __marimo__/
 
 # Operator wavemeter backups ("Backup WLM" button) — live calibration state, not source
 wlm_backups/
+
+# Matisse CounterDrift config (machine-specific, written from the GUI panel)
+matisse_cd_config.json

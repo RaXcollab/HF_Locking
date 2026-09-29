@@ -19,6 +19,7 @@ PyQt5 GUI controlling a **High Finesse WS7-30** wavemeter via `wlmData.dll` (cty
 | WavemeterWorker | All runtime DLL I/O (polling + write handlers) | YES (primary owner) |
 | ZMQRepWorker | BLACS REQ/REP commands (port 3796) | NO — signals to Worker |
 | ZMQPubWorker | Publishes measurements (port 3797) | NO — reads SharedState |
+| MatisseCDWorker | Matisse Commander TCP (CounterDrift), optional | NO — signals `request_hf_lock` to Worker |
 
 **DLL Thread Safety Rule:** `wlm_link` has NO mutex. The WavemeterWorker thread owns all DLL calls during runtime. Main thread DLL access is ONLY safe when the worker is not running (before `thread_wlm.start()` at startup, after `thread_wlm.wait()` at shutdown). Any new feature requiring DLL access during runtime MUST route through the worker thread via `QueuedConnection` signal. Violating this will corrupt data — the DLL may interleave calls across ports.
 
@@ -51,6 +52,7 @@ PyQt5 GUI controlling a **High Finesse WS7-30** wavemeter via `wlmData.dll` (cty
 | `wlmConst.py` | DLL constants (read-only, ~500 constants). PID constants at lines 217-237 |
 | `wlmData.py` | DLL function signatures via ctypes (read-only). PID signatures at lines 619-645 |
 | `diagnostics.py` | Optional timing instrumentation (disabled by default, `ENABLED=False`) |
+| `matisse_cd.py` | Optional Matisse CounterDrift offload: `MatisseCommanderClient` (TCP), `MatisseCDWorker`, `MatisseCDPanel`, config `matisse_cd_config.json` (gitignored) |
 
 ## Channel Configuration
 
@@ -67,6 +69,34 @@ PORTS = range(1, 9)
 ## BLACS Integration
 
 - **Matisse channels (port 1 TiSa_1 — was port 4 until 2026-07-29 — and port 6 TiSa-2):** remote freq control is via the Matisse **Network Server SCPI** (`SCAN:NOW`/`REFERENCECELL:NOW`, LabVIEW length-prefixed framing) — **NOT UI automation** (LabVIEW canvas exposes 0 UIA/Win32 controls). Probe: `tools/matisse_scpi_probe.py`. Findings + unverified list: `docs/matisse-c-external-locking.md` (2026-07-15).
+
+### Matisse CounterDrift (digital lock, `matisse_cd.py`, 2026-09-29)
+
+Alternative to the analog WS7-PID -> Matisse feedback: Matisse Commander's
+wavemeter plugin (CounterDrift) holds the laser; HF_Locking only moves its
+setpoint. Toggle per laser in the "Matisse CounterDrift" panel; the HF channel
+of each TiSa is user-set there (persisted). `ENABLE_MATISSE_CD` in `main_wlm.py`
+turns the whole feature off.
+
+- **Setpoint path:** Set F / ZMQ `PROGRAM_VALUE` -> `handle_setpoint_write` (WS7
+  course setpoint as before) -> `setpoint_committed(port, THz)` ->
+  CounterDrift `Setpoint <vacuum nm>`. CHECK_VALUE, plots, wait_for_lock unchanged.
+- **Mutual exclusion:** activation sets status `cd_active` first, then switches
+  the WS7 PID for that port OFF via `request_hf_lock`; `handle_lock_toggle`
+  refuses to re-arm while `cd_active`. Slow poll warns if the WS7 lock is
+  re-enabled externally.
+- **ZMQ wait_for_lock** gate is `(lock_enabled and deviation_mode) or cd_active`;
+  convergence still judged on the HF measurement with `lock_tolerance(port)`.
+- **Interlock:** activation refused unless MC's `MCP_WM_GET_WAVELENGTH` agrees
+  with c/f_HF within `max_mismatch_mhz` (catches air/vacuum, wrong switch channel).
+- **Watchdog:** |f_HF - SP| > `runaway_mhz` for `runaway_s` -> CD deactivated.
+- Closing HF_Locking leaves CD running in MC; the flag is persisted and blocks
+  the HF lock on next start until the user Deactivates.
+- Wire: LabVIEW length-prefixed framing + `#SERVER ` prefix (from a
+  collaborator's `matisse_cd_controller.py`). Probe: `python matisse_cd.py --probe host port`.
+- **UNVERIFIED on our hardware:** CD setpoint is vacuum nm; LabVIEW decimal
+  separator (`decimal_sep`); `MCP_WM_GET_WAVELENGTH` unit/behavior; TiSa-2 MC
+  server port (default 30001); CD loop bandwidth/capture range vs analog PID.
 
 ### ZMQ Protocol
 

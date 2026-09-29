@@ -90,6 +90,7 @@ class ChannelControl(QtWidgets.QWidget):
         self._freq_ref = 0.0                # plot reference (THz units)
         self._sp_mhz = 0.0                  # cached setpoint in MHz-offset coords
         self._lock_enabled = False          # "arming" state (button)
+        self._cd_active = False             # Matisse CounterDrift owns this channel
         self._global_deviation_mode = False # global deviation mode state
 
         # Guard: after the user clicks "Set Freq" or "Set V", ignore
@@ -436,7 +437,8 @@ class ChannelControl(QtWidgets.QWidget):
         # Derived lock_status (arming state + global deviation mode + within tolerance)
         if valid and (f_disp is not None):
             in_tol = abs(float(f_disp) - float(self._setpoint)) < lock_tolerance(self.port)
-            locked = bool(self._lock_enabled and self._global_deviation_mode and in_tol)
+            locking = (self._lock_enabled and self._global_deviation_mode) or self._cd_active
+            locked = bool(locking and in_tol)
         else:
             locked = False
 
@@ -445,7 +447,8 @@ class ChannelControl(QtWidgets.QWidget):
             tag = "<span style='color:#7f8c8d'>NO SIGNAL</span>"
             ftxt = "N/A"
         else:
-            tag = "<span style='color:#27ae60'>Locked</span>" if locked else "<span style='color:#e67e22'>Unlocked</span>"
+            lk = "Locked (CD)" if self._cd_active else "Locked"
+            tag = f"<span style='color:#27ae60'>{lk}</span>" if locked else "<span style='color:#e67e22'>Unlocked</span>"
             if f_disp is None or (isinstance(fplot_mhz, float) and math.isnan(fplot_mhz)):
                 ftxt = "N/A"
             else:
@@ -492,17 +495,27 @@ class ChannelControl(QtWidgets.QWidget):
             self.chk_use.blockSignals(False)
             self.chk_show.blockSignals(False)
 
-        # Lock button reflects lock_enabled (arming state)
-        if "lock_enabled" in status:
-            lock_val = bool(status.get("lock_enabled", False))
-            self._lock_enabled = lock_val
+        # Lock button reflects lock_enabled (arming state), or CounterDrift ownership
+        if "lock_enabled" in status or "cd_active" in status:
+            self._lock_enabled = bool(status.get("lock_enabled", self._lock_enabled))
+            self._cd_active = bool(status.get("cd_active", self._cd_active))
+            lock_val = self._lock_enabled
             self.lock_btn.blockSignals(True)
             self.lock_btn.setChecked(lock_val)
-            self.lock_btn.setText("LOCK ENABLED" if lock_val else "Enable Lock")
+            self.lock_btn.setEnabled(not self._cd_active)
+            if self._cd_active:
+                text, color = "MATISSE CD", "#2980b9"
+            else:
+                text = "LOCK ENABLED" if lock_val else "Enable Lock"
+                color = "#27ae60" if lock_val else "#c0392b"
+            self.lock_btn.setText(text)
+            self.lock_btn.setToolTip(
+                "HF (WS7 PID) lock disabled: Matisse CounterDrift holds this laser. "
+                "Deactivate CD in the Matisse panel to use the HF lock." if self._cd_active else "")
             # Preserve font styling while updating color
             self.lock_btn.setStyleSheet(
                 f"font-size: 11pt; font-weight: bold; "
-                f"background-color: {'#27ae60' if lock_val else '#c0392b'}; color: white;"
+                f"background-color: {color}; color: white;"
             )
             self.lock_btn.blockSignals(False)
 

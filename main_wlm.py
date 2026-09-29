@@ -7,6 +7,15 @@ import workers
 import display
 import config
 
+# Optional Matisse CounterDrift offload (matisse_cd.py). Set False to run
+# exactly as before; an import failure also just disables the panel.
+ENABLE_MATISSE_CD = True
+try:
+    import matisse_cd
+except Exception as _e:  # noqa: BLE001
+    print(f"[MATISSE] CounterDrift module unavailable: {_e!r}")
+    ENABLE_MATISSE_CD = False
+
 # Elevate process priority to reduce latency jitter. ABOVE_NORMAL (base 10) is
 # preferred over HIGH (base 13) here because Microsoft explicitly warns that
 # HIGH should be reserved for brief time-critical *events*, not sustained
@@ -237,6 +246,27 @@ class ExperimentController(QtWidgets.QMainWindow):
         self.global_ctrl.request_backup_wlm.connect(self.worker_wlm.handle_backup_wlm, QtCore.Qt.QueuedConnection)
         vbox.addWidget(self.global_ctrl)
 
+        # Matisse CounterDrift (own thread; owns Matisse Commander sockets, no DLL)
+        self.worker_cd = None
+        self.cd_panel = None
+        if ENABLE_MATISSE_CD:
+            cd_cfg = matisse_cd.load_config()
+            self.thread_cd = QtCore.QThread(self)
+            self.worker_cd = matisse_cd.MatisseCDWorker(self.shared, cd_cfg)
+            self.worker_cd.moveToThread(self.thread_cd)
+            self.thread_cd.started.connect(self.worker_cd.start)
+            self.worker_cd.finished.connect(self.thread_cd.quit)
+            self.worker_cd.log_message.connect(lambda s: print(f"[MATISSE] {s}"))
+            self.worker_wlm.setpoint_committed.connect(
+                self.worker_cd.handle_setpoint_committed, QtCore.Qt.QueuedConnection)
+            self.worker_cd.request_hf_lock.connect(
+                self.worker_wlm.handle_lock_toggle, QtCore.Qt.QueuedConnection)
+            self.cd_panel = matisse_cd.MatisseCDPanel(list(cd_cfg["lasers"].keys()))
+            self.cd_panel.request_channel.connect(self.worker_cd.handle_set_channel, QtCore.Qt.QueuedConnection)
+            self.cd_panel.request_connect.connect(self.worker_cd.handle_connect, QtCore.Qt.QueuedConnection)
+            self.cd_panel.request_activate.connect(self.worker_cd.handle_activate, QtCore.Qt.QueuedConnection)
+            vbox.addWidget(self.cd_panel)
+
         # Worker -> UI: only write-handler feedback (infrequent, no backlog risk)
         self.thread_wlm.started.connect(self.worker_wlm.start_polling)
         self.worker_wlm.status_updated.connect(self.handle_slow_update)
@@ -276,6 +306,8 @@ class ExperimentController(QtWidgets.QMainWindow):
 
         # Start
         self.thread_wlm.start()
+        if self.worker_cd is not None:
+            self.thread_cd.start()
         self.zmq_pub.start()
         self.zmq_rep.start()
 
@@ -310,6 +342,9 @@ class ExperimentController(QtWidgets.QMainWindow):
         self.global_ctrl.update_globals(g)
         for w in self.channels.values():
             w.set_globals(g)
+
+        if self.cd_panel is not None:
+            self.cd_panel.update_snapshot(self.worker_cd.get_snapshot())
 
     @QtCore.pyqtSlot(int, dict)
     def handle_slow_update(self, port: int, status_delta: dict):
@@ -466,6 +501,14 @@ class ExperimentController(QtWidgets.QMainWindow):
             self.zmq_pub.stop(); self.zmq_pub.wait(500)
         except Exception:
             pass
+
+        # Stop Matisse CounterDrift worker (closes sockets; CD itself keeps running in MC)
+        if self.worker_cd is not None:
+            try:
+                QtCore.QMetaObject.invokeMethod(self.worker_cd, "stop", QtCore.Qt.QueuedConnection)
+                self.thread_cd.wait(3000)
+            except Exception:
+                pass
 
         # Stop WLM worker + thread
         try:
