@@ -673,6 +673,26 @@ class MatisseCDPanel(QtWidgets.QGroupBox):
 
 
 # ---------------------------------------------------------------------------
+# Wiring into HF_Locking (called by main_wlm.py; pinned by tests)
+# ---------------------------------------------------------------------------
+
+def wire_into_hf(worker_wlm, worker_cd, panel=None):
+    """Connect MatisseCDWorker to WavemeterWorker (and the GUI panel).
+
+    Every connection is QUEUED: the three objects live on different threads
+    in production, and queued delivery is what keeps DLL calls on the WLM
+    worker thread and Matisse sockets on the CD thread.
+    """
+    q = QtCore.Qt.QueuedConnection
+    worker_wlm.setpoint_committed.connect(worker_cd.handle_setpoint_committed, q)
+    worker_cd.request_hf_lock.connect(worker_wlm.handle_lock_toggle, q)
+    if panel is not None:
+        panel.request_channel.connect(worker_cd.handle_set_channel, q)
+        panel.request_connect.connect(worker_cd.handle_connect, q)
+        panel.request_activate.connect(worker_cd.handle_activate, q)
+
+
+# ---------------------------------------------------------------------------
 # Read-only bring-up probe
 # ---------------------------------------------------------------------------
 

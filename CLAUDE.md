@@ -92,6 +92,11 @@ turns the whole feature off. Front end is THz everywhere; nm only on the MC wire
 - **Watchdog:** |f_HF - SP| > `runaway_mhz` for `runaway_s` -> CD deactivated.
 - Closing HF_Locking leaves CD running in MC; the flag is persisted and blocks
   the HF lock on next start until the user Deactivates.
+- Tests: `tests/test_matisse_cd.py` (module, fake MC TCP server),
+  `tests/test_matisse_integration.py` (real SharedState/WavemeterWorker/
+  ChannelControl + `wire_into_hf`, written test-first; I1-I3/W1-W2 verified
+  RED against pre-CD `workers.py`/`display.py`), I4 in `test_zmq_v2_protocol.py`.
+  Wiring lives in `matisse_cd.wire_into_hf` (all QueuedConnection) -- extend there.
 - Wire: LabVIEW length-prefixed framing + `#SERVER ` prefix (from a
   collaborator's `matisse_cd_controller.py`). Probe: `python matisse_cd.py --probe host port`.
 - **UNVERIFIED on our hardware:** CD setpoint is vacuum nm; LabVIEW decimal

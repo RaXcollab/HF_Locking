@@ -257,14 +257,8 @@ class ExperimentController(QtWidgets.QMainWindow):
             self.thread_cd.started.connect(self.worker_cd.start)
             self.worker_cd.finished.connect(self.thread_cd.quit)
             self.worker_cd.log_message.connect(lambda s: print(f"[MATISSE] {s}"))
-            self.worker_wlm.setpoint_committed.connect(
-                self.worker_cd.handle_setpoint_committed, QtCore.Qt.QueuedConnection)
-            self.worker_cd.request_hf_lock.connect(
-                self.worker_wlm.handle_lock_toggle, QtCore.Qt.QueuedConnection)
             self.cd_panel = matisse_cd.MatisseCDPanel(list(cd_cfg["lasers"].keys()))
-            self.cd_panel.request_channel.connect(self.worker_cd.handle_set_channel, QtCore.Qt.QueuedConnection)
-            self.cd_panel.request_connect.connect(self.worker_cd.handle_connect, QtCore.Qt.QueuedConnection)
-            self.cd_panel.request_activate.connect(self.worker_cd.handle_activate, QtCore.Qt.QueuedConnection)
+            matisse_cd.wire_into_hf(self.worker_wlm, self.worker_cd, panel=self.cd_panel)
             vbox.addWidget(self.cd_panel)
 
         # Worker -> UI: only write-handler feedback (infrequent, no backlog risk)

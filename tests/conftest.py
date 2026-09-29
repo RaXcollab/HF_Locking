@@ -126,3 +126,51 @@ def make_experiment_controller_self():
         channels={p: mock.Mock(name="ch" + str(p)) for p in w.PORTS},
         global_ctrl=mock.Mock(name="global_ctrl"),
     )
+
+
+# ----- Matisse CounterDrift fakes (no sockets) -----------------------------
+
+class FakeCDState:
+    """Duck-typed subset of SharedExperimentState used by MatisseCDWorker."""
+
+    def __init__(self):
+        self.status = {p: {"setpoint": 0.0, "lock_enabled": False, "cd_active": False}
+                       for p in range(1, 9)}
+        self.meas = {p: {"valid": False, "freq_display": None} for p in range(1, 9)}
+
+    def get_status(self, port):
+        return dict(self.status[port])
+
+    def update_status(self, port, delta):
+        self.status[port].update(delta)
+
+    def get_measurement(self, port):
+        return dict(self.meas[port])
+
+
+class FakeMatisseClient:
+    def __init__(self, host, port, **_kw):
+        self.connected = False
+        self.calls = []
+        self.wavelength = 299792.458 / 375.0   # nm, matches F_TISA in tests
+        self.fail_connect = False
+
+    def connect(self):
+        if self.fail_connect:
+            raise ConnectionRefusedError("refused")
+        self.connected = True
+
+    def close(self, graceful=True):
+        self.connected = False
+
+    def cd_open(self):
+        self.calls.append(("open",))
+
+    def cd_setpoint_nm(self, s):
+        self.calls.append(("setpoint", s))
+
+    def cd_activate(self, on):
+        self.calls.append(("activate", on))
+
+    def get_wavelength_nm(self):
+        return self.wavelength

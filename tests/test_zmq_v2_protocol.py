@@ -333,3 +333,51 @@ def test_H8_wait_for_lock_absent_defaults_to_no_wait(make_v2_pair):
 
     assert reply["status"] == "SUCCESS"
     outer._wait_for_lock.assert_not_called()
+
+
+# I4 (2026-09-29): Matisse CounterDrift owns the channel -> wait_for_lock
+# must still wait, although the WS7 PID lock and deviation mode are OFF
+# (activating CD switches the WS7 lock off; CD needs no deviation mode).
+
+def test_I4_wait_for_lock_waits_when_counterdrift_active(make_v2_pair):
+    outer, client_t, v2_server = make_v2_pair(
+        lock_enabled=False, deviation_mode=False, lock_will_succeed=True)
+    outer.state.update_status(1, {"cd_active": True})
+
+    reply = _roundtrip(client_t, v2_server, {
+        "v": 2, "id": 30, "action": "PROGRAM_VALUE",
+        "connection": "1", "value": 375.0,
+        "args": {"wait_for_lock": True},
+    })
+
+    assert reply["status"] == "SUCCESS"
+    outer.request_setpoint_write.emit.assert_called_once_with(1, 375.0)
+    outer._wait_for_lock.assert_called_once_with(1, 375.0)
+
+
+def test_I4_counterdrift_timeout_returns_TIMEOUT(make_v2_pair):
+    outer, client_t, v2_server = make_v2_pair(
+        lock_enabled=False, deviation_mode=False, lock_will_succeed=False)
+    outer.state.update_status(1, {"cd_active": True})
+
+    reply = _roundtrip(client_t, v2_server, {
+        "v": 2, "id": 31, "action": "PROGRAM_VALUE",
+        "connection": "1", "value": 375.0,
+        "args": {"wait_for_lock": True},
+    })
+
+    assert reply["status"] == "TIMEOUT"
+    assert reply["error"]["code"] == "lock_wait_timeout"
+
+
+def test_I4_counterdrift_active_but_no_wait_requested_does_not_block(make_v2_pair):
+    outer, client_t, v2_server = make_v2_pair()
+    outer.state.update_status(1, {"cd_active": True})
+
+    reply = _roundtrip(client_t, v2_server, {
+        "v": 2, "id": 32, "action": "PROGRAM_VALUE",
+        "connection": "1", "value": 375.0,
+    })
+
+    assert reply["status"] == "SUCCESS"
+    outer._wait_for_lock.assert_not_called()

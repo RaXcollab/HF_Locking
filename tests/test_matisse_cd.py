@@ -26,58 +26,12 @@ import pytest
 
 matisse_cd = pytest.importorskip("matisse_cd", reason="needs PyQt5")
 
-from tests.conftest import require_workers, make_wavemeter_worker_self  # noqa: E402
+from tests.conftest import (  # noqa: E402
+    require_workers, make_wavemeter_worker_self, FakeCDState as FakeState, FakeMatisseClient as FakeClient,
+)
 
 F_TISA = 375.000000          # THz
 NM_TISA = matisse_cd.C_NM_THZ / F_TISA
-
-
-# ------------------------------------------------------------ fakes
-
-class FakeState:
-    """Duck-typed subset of SharedExperimentState used by MatisseCDWorker."""
-
-    def __init__(self):
-        self.status = {p: {"setpoint": 0.0, "lock_enabled": False, "cd_active": False}
-                       for p in range(1, 9)}
-        self.meas = {p: {"valid": False, "freq_display": None} for p in range(1, 9)}
-
-    def get_status(self, port):
-        return dict(self.status[port])
-
-    def update_status(self, port, delta):
-        self.status[port].update(delta)
-
-    def get_measurement(self, port):
-        return dict(self.meas[port])
-
-
-class FakeClient:
-    def __init__(self, host, port, **_kw):
-        self.connected = False
-        self.calls = []
-        self.wavelength = NM_TISA
-        self.fail_connect = False
-
-    def connect(self):
-        if self.fail_connect:
-            raise ConnectionRefusedError("refused")
-        self.connected = True
-
-    def close(self, graceful=True):
-        self.connected = False
-
-    def cd_open(self):
-        self.calls.append(("open",))
-
-    def cd_setpoint_nm(self, s):
-        self.calls.append(("setpoint", s))
-
-    def cd_activate(self, on):
-        self.calls.append(("activate", on))
-
-    def get_wavelength_nm(self):
-        return self.wavelength
 
 
 def make_worker(port_tisa1=1, sp=F_TISA, f_meas=F_TISA, lock_enabled=False):
