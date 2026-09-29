@@ -19,7 +19,7 @@ PyQt5 GUI controlling a **High Finesse WS7-30** wavemeter via `wlmData.dll` (cty
 | WavemeterWorker | All runtime DLL I/O (polling + write handlers) | YES (primary owner) |
 | ZMQRepWorker | BLACS REQ/REP commands (port 3796) | NO — signals to Worker |
 | ZMQPubWorker | Publishes measurements (port 3797) | NO — reads SharedState |
-| MatisseCDWorker | Matisse Commander TCP (CounterDrift), optional | NO — signals `request_hf_lock` to Worker |
+| MatisseCDWorker ×N | One QThread per Matisse (`MatisseCDGroup`), TCP to Matisse Commander, optional | NO — signals `request_hf_lock` to Worker |
 
 **DLL Thread Safety Rule:** `wlm_link` has NO mutex. The WavemeterWorker thread owns all DLL calls during runtime. Main thread DLL access is ONLY safe when the worker is not running (before `thread_wlm.start()` at startup, after `thread_wlm.wait()` at shutdown). Any new feature requiring DLL access during runtime MUST route through the worker thread via `QueuedConnection` signal. Violating this will corrupt data — the DLL may interleave calls across ports.
 
@@ -87,9 +87,20 @@ turns the whole feature off. Front end is THz everywhere; nm only on the MC wire
   re-enabled externally.
 - **ZMQ wait_for_lock** gate is `(lock_enabled and deviation_mode) or cd_active`;
   convergence still judged on the HF measurement with `lock_tolerance(port)`.
-- **Interlock:** activation refused unless MC's `MCP_WM_GET_WAVELENGTH` agrees
-  with c/f_HF within `max_mismatch_mhz` (catches air/vacuum, wrong switch channel).
+- **Interlocks:** activation refused unless MC's `MCP_WM_GET_WAVELENGTH` agrees
+  with c/f_HF within `max_mismatch_mhz` (air/vacuum, wrong switch channel) AND
+  |f_HF - WS7 setpoint| <= `max_activation_offset_mhz`. The port is claimed
+  (`CDRegistry`; `cd_active` = OR over lasers) BEFORE lock state is read fresh;
+  a failed activation restores the HF lock it switched off.
+- **Setpoint delivery:** a failed forward stays pending, is retried every poll,
+  and the panel shows "SP NOT DELIVERED".
 - **Watchdog:** |f_HF - SP| > `runaway_mhz` for `runaway_s` -> CD deactivated.
+- **Error replies:** `Error`/`Err` anywhere, `!...`, or DSP `N,"..."` with N != 0.
+  Transport errors close the socket (no stale-reply desync); writes retry once,
+  wavelength poll and plugin open (`open_timeout_s`=120) never retry.
+- Fight state (CD active AND WS7 lock on): channel button turns orange and stays
+  clickable to switch the HF lock OFF.
+- Adversarial review 2026-09-29: findings pinned in `tests/test_matisse_review_fixes.py`.
 - Closing HF_Locking leaves CD running in MC; the flag is persisted and blocks
   the HF lock on next start until the user Deactivates.
 - Tests: `tests/test_matisse_cd.py` (module, fake MC TCP server),

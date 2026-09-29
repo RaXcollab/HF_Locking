@@ -502,16 +502,23 @@ class ChannelControl(QtWidgets.QWidget):
             lock_val = self._lock_enabled
             self.lock_btn.blockSignals(True)
             self.lock_btn.setChecked(lock_val)
-            self.lock_btn.setEnabled(not self._cd_active)
-            if self._cd_active:
+            # CD owns the channel: button disabled -- EXCEPT when the WS7 lock is
+            # on anyway (loops fighting): keep it clickable so it can be switched
+            # off (enabling is refused by WavemeterWorker while cd_active).
+            self.lock_btn.setEnabled((not self._cd_active) or lock_val)
+            tip = ""
+            if self._cd_active and lock_val:
+                text, color = "HF+CD FIGHT: click", "#d35400"
+                tip = "WS7 PID lock AND Matisse CounterDrift both active. Click to switch the HF lock off."
+            elif self._cd_active:
                 text, color = "MATISSE CD", "#2980b9"
+                tip = ("HF (WS7 PID) lock disabled: Matisse CounterDrift holds this laser. "
+                       "Deactivate CD in the Matisse panel to use the HF lock.")
             else:
                 text = "LOCK ENABLED" if lock_val else "Enable Lock"
                 color = "#27ae60" if lock_val else "#c0392b"
             self.lock_btn.setText(text)
-            self.lock_btn.setToolTip(
-                "HF (WS7 PID) lock disabled: Matisse CounterDrift holds this laser. "
-                "Deactivate CD in the Matisse panel to use the HF lock." if self._cd_active else "")
+            self.lock_btn.setToolTip(tip)
             # Preserve font styling while updating color
             self.lock_btn.setStyleSheet(
                 f"font-size: 11pt; font-weight: bold; "

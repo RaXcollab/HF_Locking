@@ -47,9 +47,11 @@ Standalone read-only probe (no HF_Locking needed):
 """
 import json
 import os
+import re
 import socket
 import struct
 import sys
+import threading
 import time
 from datetime import datetime
 
@@ -73,10 +75,12 @@ DEFAULT_CONFIG = {
     "decimal_sep": ".",            # separator in the setpoint string sent to LabVIEW
     "setpoint_decimals": 8,        # nm digits; 1e-8 nm ~ 5 kHz at 800 nm
     "max_mismatch_mhz": 500.0,     # activation interlock: |f_HF - c/lambda_MC|
+    "max_activation_offset_mhz": 1000.0,  # activation interlock: |f_HF - WS7 setpoint|
     "runaway_mhz": 5000.0,         # watchdog: deactivate CD if |f_HF - SP| exceeds this ...
     "runaway_s": 20.0,             # ... continuously for this long
     "connect_timeout_s": 2.0,
     "command_timeout_s": 10.0,
+    "open_timeout_s": 120.0,       # MCP_WM_CounterDrift (cold plugin start), never retried
 }
 
 POLL_MS = 1000
@@ -97,22 +101,39 @@ def format_nm(nm: float, decimals: int = 8, decimal_sep: str = ".") -> str:
 # Config persistence (atomic write, same pattern as config.py)
 # ---------------------------------------------------------------------------
 
+def _dedupe_channels(cfg: dict) -> None:
+    """Two lasers on one HF channel would let an inactive one un-block the HF
+    lock of an active one. Keep the first (active lasers win), unassign the rest."""
+    seen = {}
+    order = sorted(cfg["lasers"].items(), key=lambda kv: not kv[1].get("active", False))
+    for name, lc in order:
+        p = int(lc.get("wlm_port", 0) or 0)
+        if p == 0:
+            continue
+        if p in seen:
+            print(f"[MATISSE] WARNING: {name} and {seen[p]} both on HF ch{p}; "
+                  f"unassigning {name} (set its channel in the panel).")
+            lc["wlm_port"] = 0
+        else:
+            seen[p] = name
+
+
 def load_config(path: str = CONFIG_PATH) -> dict:
     cfg = json.loads(json.dumps(DEFAULT_CONFIG))  # deep copy
-    if not os.path.exists(path):
-        return cfg
-    try:
-        with open(path, "r") as f:
-            saved = json.load(f)
-    except Exception as e:
-        print(f"[MATISSE] WARNING: could not read {path}: {e}; using defaults")
-        return cfg
-    for k, v in saved.items():
-        if k == "lasers" and isinstance(v, dict):
-            for name, lc in v.items():
-                cfg["lasers"].setdefault(name, {}).update(lc)
-        elif k in cfg:
-            cfg[k] = v
+    if os.path.exists(path):
+        try:
+            with open(path, "r") as f:
+                saved = json.load(f)
+        except Exception as e:
+            print(f"[MATISSE] WARNING: could not read {path}: {e}; using defaults")
+            saved = {}
+        for k, v in saved.items():
+            if k == "lasers" and isinstance(v, dict):
+                for name, lc in v.items():
+                    cfg["lasers"].setdefault(name, {}).update(lc)
+            elif k in cfg:
+                cfg[k] = v
+    _dedupe_channels(cfg)
     return cfg
 
 
@@ -133,22 +154,40 @@ class MatisseError(RuntimeError):
     """Matisse Commander answered, but with an error reply."""
 
 
+# Error reply shapes: "Error: ..." (MC), 'N,"msg"' with N != 0 (laser DSP),
+# "!ERROR n", header-echoed ":CMD: Error: ...", "Err: ...".
+_ERR_WORD = re.compile(r"\berr(or)?\b", re.IGNORECASE)
+_DSP_CODE = re.compile(r'^\s*(-?\d+)\s*,\s*"')
+
+
+def _is_error_reply(reply: str) -> bool:
+    m = _DSP_CODE.match(reply)
+    if m:
+        return int(m.group(1)) != 0
+    return bool(_ERR_WORD.search(reply)) or reply.lstrip().startswith("!")
+
+
 class MatisseCommanderClient:
     """One persistent connection to one Matisse Commander Network Server.
 
-    NOT thread-safe: MatisseCDWorker is the only caller. Transport failures
-    close the socket and retry once on a fresh connection (all commands we
-    send are idempotent); a second failure propagates as OSError.
+    Used only from its laser's worker thread, except abort() (any thread),
+    which shuts the socket down to unblock a hung recv at application exit.
+
+    A transport failure (incl. timeout mid-reply) closes the socket, so a late
+    reply can never be read as the answer to the next command. Idempotent
+    writes retry once on a fresh connection; read-only polls and the slow
+    plugin-open do not.
     """
     _HDR = ">I"
     _MAX_PAYLOAD = 1_000_000
 
     def __init__(self, host: str, port: int, connect_timeout_s: float = 2.0,
-                 command_timeout_s: float = 10.0):
+                 command_timeout_s: float = 10.0, open_timeout_s: float = 120.0):
         self.host = host
         self.port = int(port)
         self.connect_timeout_s = float(connect_timeout_s)
         self.command_timeout_s = float(command_timeout_s)
+        self.open_timeout_s = float(open_timeout_s)
         self.sock = None
 
     @property
@@ -158,6 +197,14 @@ class MatisseCommanderClient:
     def connect(self) -> None:
         self.close(graceful=False)
         s = socket.create_connection((self.host, self.port), timeout=self.connect_timeout_s)
+        # Drain any banner MC emits on connect (as the collaborator's client does);
+        # otherwise every later reply would be read one frame late.
+        s.settimeout(0.3)
+        try:
+            while s.recv(4096):
+                pass
+        except socket.timeout:
+            pass
         s.settimeout(self.command_timeout_s)
         self.sock = s
 
@@ -177,6 +224,14 @@ class MatisseCommanderClient:
         except Exception:
             pass
         self.sock = None
+
+    def abort(self) -> None:
+        s = self.sock
+        if s is not None:
+            try:
+                s.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
 
     def _send(self, cmd: str) -> None:
         payload = cmd.encode("ascii")
@@ -201,31 +256,37 @@ class MatisseCommanderClient:
             text = text[len("Matisse>"):].strip()
         return text
 
-    def ask(self, cmd: str) -> str:
+    def ask(self, cmd: str, timeout_s: float = None, retry: bool = True) -> str:
         for attempt in (0, 1):
             try:
                 if self.sock is None:
                     self.connect()
-                self._send(cmd)
-                return self._read_reply()
+                self.sock.settimeout(timeout_s or self.command_timeout_s)
+                try:
+                    self._send(cmd)
+                    return self._read_reply()
+                finally:
+                    if self.sock is not None:
+                        self.sock.settimeout(self.command_timeout_s)
             except OSError:
                 self.close(graceful=False)
-                if attempt:
+                if attempt or not retry:
                     raise
         raise AssertionError("unreachable")
 
-    def mcp(self, cmd: str) -> str:
+    def mcp(self, cmd: str, timeout_s: float = None, retry: bool = True) -> str:
         """Send a Server-Only MCP command; raise MatisseError on an error reply."""
         full = cmd if cmd.lstrip().startswith("#SERVER") else f"#SERVER {cmd}"
-        reply = self.ask(full)
-        low = reply.lower()
-        if low.startswith("error") or "syntax error" in low:
+        reply = self.ask(full, timeout_s=timeout_s, retry=retry)
+        if _is_error_reply(reply):
             raise MatisseError(f"{cmd!r} -> {reply!r}")
         return reply
 
     # ---- CounterDrift wrappers (command strings from matisse_cd_controller.py) ----
     def cd_open(self) -> str:
-        return self.mcp("MCP_WM_CounterDrift")
+        # Cold plugin start can take many seconds (collaborator used 120 s);
+        # never re-send it on timeout.
+        return self.mcp("MCP_WM_CounterDrift", timeout_s=self.open_timeout_s, retry=False)
 
     def cd_setpoint_nm(self, nm_str: str) -> str:
         return self.mcp(f"MCP_WM.Counterdrift Setpoint {nm_str}")
@@ -234,15 +295,73 @@ class MatisseCommanderClient:
         return self.mcp(f"MCP_WM.Counterdrift Activate {'true' if state else 'false'}")
 
     def get_wavelength_nm(self) -> float:
-        reply = self.mcp("MCP_WM_GET_WAVELENGTH")
+        reply = self.mcp("MCP_WM_GET_WAVELENGTH", retry=False)
         try:
-            return float(reply.split()[0].replace(",", "."))
+            return float(reply.split()[-1 if reply.startswith(":") else 0].replace(",", "."))
         except (IndexError, ValueError):
             raise MatisseError(f"unparseable wavelength reply {reply!r}")
 
 
 # ---------------------------------------------------------------------------
-# Worker (own QThread; owns all Matisse sockets; never touches the DLL)
+# Cross-laser registry (shared by the per-laser workers)
+# ---------------------------------------------------------------------------
+
+class CDRegistry:
+    """Which laser claims which HF channel. cd_active(port) is the OR over
+    lasers, so an idle laser can never clear another laser's claim. Also
+    serialises config edits + saves across worker threads."""
+
+    def __init__(self, cfg: dict, save_fn=save_config):
+        self.cfg = cfg
+        self._save_fn = save_fn
+        self._lock = threading.RLock()
+        self._claims = {}   # name -> port (activating or active)
+
+    def claim(self, name: str, port: int) -> bool:
+        with self._lock:
+            if any(p == port for n, p in self._claims.items() if n != name):
+                return False
+            self._claims[name] = port
+            return True
+
+    def release(self, name: str) -> None:
+        with self._lock:
+            self._claims.pop(name, None)
+
+    def claimed(self, port: int) -> bool:
+        with self._lock:
+            return port in self._claims.values()
+
+    def port_of(self, name: str) -> int:
+        with self._lock:
+            return int(self.cfg["lasers"][name].get("wlm_port", 0) or 0)
+
+    def assign(self, name: str, port: int) -> str:
+        """Set a laser's HF channel; returns an error string or ''."""
+        with self._lock:
+            if name in self._claims:
+                return "deactivate CounterDrift before changing its HF channel"
+            if port and any(int(lc.get("wlm_port", 0) or 0) == port
+                            for n, lc in self.cfg["lasers"].items() if n != name):
+                return f"ch{port} is already assigned to another Matisse"
+            self.cfg["lasers"][name]["wlm_port"] = int(port)
+            self._save()
+            return ""
+
+    def set(self, name: str, **kv) -> None:
+        with self._lock:
+            self.cfg["lasers"][name].update(kv)
+            self._save()
+
+    def _save(self):
+        try:
+            self._save_fn(self.cfg)
+        except Exception as e:
+            print(f"[MATISSE] config save failed: {e}")
+
+
+# ---------------------------------------------------------------------------
+# Worker (own QThread per laser; owns that laser's socket; never touches the DLL)
 # ---------------------------------------------------------------------------
 
 class MatisseCDWorker(QObject):
@@ -252,32 +371,37 @@ class MatisseCDWorker(QObject):
     finished = pyqtSignal()
 
     def __init__(self, shared_state, cfg: dict, client_factory=MatisseCommanderClient,
-                 save_fn=save_config):
+                 save_fn=save_config, names=None, registry=None):
         super().__init__()
         self.state = shared_state
         self.cfg = cfg
+        self.registry = registry or CDRegistry(cfg, save_fn)
         self._client_factory = client_factory
-        self._save_fn = save_fn
         self._timer = None
+        self._stopping = threading.Event()
         self._mutex = QMutex()      # guards self._snap (GUI pulls it)
         self._lasers = {}
         self._snap = {}
-        for name, lc in cfg["lasers"].items():
+        for name in (names or list(cfg["lasers"])):
+            lc = cfg["lasers"][name]
+            active = bool(lc.get("active", False))
             self._lasers[name] = {
                 "client": None,
                 "want_connected": bool(lc.get("connect", True)),
                 "next_connect_t": 0.0,
                 "cd_opened": False,
-                "active": bool(lc.get("active", False)),
-                "restored": bool(lc.get("active", False)),
+                "active": active,
+                "restored": active,
                 "runaway_since": None,
+                "pending_sp": None,     # THz not yet delivered to CounterDrift
             }
+            if active and self._port(name) in range(1, 9):
+                self.registry.claim(name, self._port(name))
             self._snap[name] = {
-                "wlm_port": int(lc.get("wlm_port", 0)),
                 "host": lc.get("host"), "port": lc.get("port"),
-                "connected": False, "active": False, "restored": False,
                 "wavelength_nm": None, "mismatch_mhz": None, "last_error": "",
             }
+        for name in self._lasers:
             self._publish(name)
 
     # ---- helpers ----------------------------------------------------------
@@ -285,16 +409,14 @@ class MatisseCDWorker(QObject):
         return self.cfg["lasers"][name]
 
     def _port(self, name) -> int:
-        return int(self._lc(name).get("wlm_port", 0))
+        return self.registry.port_of(name)
 
     def _log(self, msg):
         self.log_message.emit(msg)
 
-    def _persist(self):
-        try:
-            self._save_fn(self.cfg)
-        except Exception as e:
-            self._log(f"config save failed: {e}")
+    def _publish_port(self, port):
+        if port in range(1, 9):
+            self.state.update_status(port, {"cd_active": self.registry.claimed(port)})
 
     def _publish(self, name, **extra):
         L = self._lasers[name]
@@ -307,8 +429,8 @@ class MatisseCDWorker(QObject):
             s["active"] = L["active"]
             s["restored"] = L["restored"]
             s["want_connected"] = L["want_connected"]
-        if port in range(1, 9):
-            self.state.update_status(port, {"cd_active": L["active"]})
+            s["setpoint_pending"] = L["pending_sp"] is not None
+        self._publish_port(port)
 
     def get_snapshot(self) -> dict:
         """Thread-safe copy for the GUI's PULL refresh."""
@@ -322,8 +444,17 @@ class MatisseCDWorker(QObject):
             L["client"] = self._client_factory(
                 lc["host"], lc["port"],
                 connect_timeout_s=self.cfg["connect_timeout_s"],
-                command_timeout_s=self.cfg["command_timeout_s"])
+                command_timeout_s=self.cfg["command_timeout_s"],
+                open_timeout_s=self.cfg["open_timeout_s"])
         return L["client"]
+
+    def abort_io(self):
+        """Any thread: unblock a hung socket call so stop() can run."""
+        self._stopping.set()
+        for L in self._lasers.values():
+            c = L["client"]
+            if c is not None and hasattr(c, "abort"):
+                c.abort()
 
     def _try_connect(self, name) -> bool:
         L = self._lasers[name]
@@ -349,14 +480,22 @@ class MatisseCDWorker(QObject):
             return None
         return float(f)
 
+    def _hf_lock_on(self, port) -> bool:
+        return bool(self.state.get_status(port).get("lock_enabled", False))
+
     def _set_active(self, name, active: bool):
         L = self._lasers[name]
         L["active"] = bool(active)
         L["restored"] = False
         L["runaway_since"] = None
-        self._lc(name)["active"] = bool(active)
-        self._persist()
+        if not active:
+            L["pending_sp"] = None
+            self.registry.release(name)
+        self.registry.set(name, active=bool(active))
         self._publish(name)
+
+    def _nm_str(self, f_thz):
+        return format_nm(thz_to_nm(f_thz), self.cfg["setpoint_decimals"], self.cfg["decimal_sep"])
 
     # ---- lifecycle --------------------------------------------------------
     @pyqtSlot()
@@ -374,6 +513,7 @@ class MatisseCDWorker(QObject):
 
     @pyqtSlot()
     def stop(self):
+        self._stopping.set()
         if self._timer:
             self._timer.stop()
         for name, L in self._lasers.items():
@@ -383,32 +523,29 @@ class MatisseCDWorker(QObject):
                 L["client"].close()
         self.finished.emit()
 
-    # ---- GUI commands -----------------------------------------------------
+    # ---- GUI commands (name-addressed; a worker ignores lasers it does not own) --
     @pyqtSlot(str, int)
     def handle_set_channel(self, name: str, wlm_port: int):
-        L = self._lasers[name]
+        if name not in self._lasers:
+            return
         old = self._port(name)
         if wlm_port == old:
             return
-        if L["active"]:
-            self._log(f"{name}: deactivate CounterDrift before changing its HF channel.")
+        err = self.registry.assign(name, int(wlm_port))
+        if err:
+            self._log(f"{name}: {err}.")
             self._publish(name)
             return
-        if wlm_port != 0 and any(self._port(n) == wlm_port for n in self._lasers if n != name):
-            self._log(f"{name}: ch{wlm_port} is already assigned to another Matisse.")
-            self._publish(name)
-            return
-        self._lc(name)["wlm_port"] = int(wlm_port)
-        self._persist()
         self._log(f"{name}: HF channel ch{old} -> ch{wlm_port}")
         self._publish(name, wavelength_nm=None, mismatch_mhz=None)
 
     @pyqtSlot(str, bool)
     def handle_connect(self, name: str, want: bool):
+        if name not in self._lasers:
+            return
         L = self._lasers[name]
         L["want_connected"] = bool(want)
-        self._lc(name)["connect"] = bool(want)
-        self._persist()
+        self.registry.set(name, connect=bool(want))
         if want:
             L["next_connect_t"] = 0.0
             self._try_connect(name)
@@ -419,6 +556,8 @@ class MatisseCDWorker(QObject):
 
     @pyqtSlot(str, bool)
     def handle_activate(self, name: str, enable: bool):
+        if name not in self._lasers:
+            return
         if enable:
             ok, why = self._activate(name)
             if not ok:
@@ -434,20 +573,21 @@ class MatisseCDWorker(QObject):
             return True, ""
         if port not in range(1, 9):
             return False, "no HF channel assigned"
-        if any(self._lasers[n]["active"] and self._port(n) == port
-               for n in self._lasers if n != name):
-            return False, f"ch{port} already driven by another CounterDrift"
         if not self._try_connect(name):
             return False, "Matisse Commander not reachable"
         c = self._client(name)
 
-        st = self.state.get_status(port)
-        sp = float(st.get("setpoint", 0.0) or 0.0)
+        sp = float(self.state.get_status(port).get("setpoint", 0.0) or 0.0)
         if sp < MIN_VALID_SETPOINT_THZ:
             return False, f"ch{port} has no valid WS7 setpoint ({sp})"
         f_hf = self._hf_freq_thz(port)
         if f_hf is None:
             return False, f"no valid HF measurement on ch{port}"
+        offset = (f_hf - sp) * 1e6
+        if abs(offset) > float(self.cfg["max_activation_offset_mhz"]):
+            return False, (f"laser is {offset:+.0f} MHz from the ch{port} setpoint "
+                           f"(limit {self.cfg['max_activation_offset_mhz']} MHz). "
+                           f"Set F near the current frequency first.")
 
         # Interlock: MC's wavemeter plugin must see the same laser in the same
         # (vacuum) convention as HF_Locking. Catches air/vacuum (~100 GHz),
@@ -464,19 +604,20 @@ class MatisseCDWorker(QObject):
                            f"{self.cfg['max_mismatch_mhz']} MHz -- wrong channel or "
                            f"air/vacuum convention?")
 
-        # Block HF re-arm BEFORE switching it off, then wait for the DLL write.
-        self.state.update_status(port, {"cd_active": True})
-        if st.get("lock_enabled", False):
+        # Claim the port (blocks HF re-arm), THEN read the lock state fresh --
+        # it may have changed during the wavelength round-trip.
+        if not self.registry.claim(name, port):
+            return False, f"ch{port} already driven by another CounterDrift"
+        self._publish_port(port)
+        hf_was_on = self._hf_lock_on(port)
+        if hf_was_on:
             self.request_hf_lock.emit(port, False)
-            t_end = time.monotonic() + HF_LOCK_OFF_WAIT_S
-            while self.state.get_status(port).get("lock_enabled", False):
-                if time.monotonic() > t_end:
-                    self.state.update_status(port, {"cd_active": L["active"]})
-                    return False, f"HF lock on ch{port} did not switch off"
-                time.sleep(0.02)
+            if not self._wait_hf_off(port):
+                self._abort_activation(name, port, hf_was_on)
+                return False, f"HF lock on ch{port} did not switch off"
             self._log(f"{name}: HF (WS7 PID) lock on ch{port} switched OFF for CounterDrift")
 
-        nm_str = format_nm(thz_to_nm(sp), self.cfg["setpoint_decimals"], self.cfg["decimal_sep"])
+        nm_str = self._nm_str(sp)
         try:
             if not L["cd_opened"]:
                 c.cd_open()
@@ -488,16 +629,36 @@ class MatisseCDWorker(QObject):
                 c.cd_activate(False)
             except Exception:
                 pass
-            self.state.update_status(port, {"cd_active": False})
+            self._abort_activation(name, port, hf_was_on)
             return False, f"Matisse Commander command failed: {e}"
 
         self._set_active(name, True)
+        L["pending_sp"] = None
         self._log(f"{name}: CounterDrift ACTIVE on ch{port}, setpoint {sp:.7f} THz = {nm_str} nm")
+        if self._hf_lock_on(port):   # re-armed outside HF_Locking meanwhile
+            self._log(f"WARNING: {name}: WS7 lock on ch{port} came back ON during "
+                      f"activation; switching it off again.")
+            self.request_hf_lock.emit(port, False)
         return True, ""
 
+    def _wait_hf_off(self, port) -> bool:
+        t_end = time.monotonic() + HF_LOCK_OFF_WAIT_S
+        while self._hf_lock_on(port):
+            if time.monotonic() > t_end or self._stopping.is_set():
+                return False
+            time.sleep(0.02)
+        return True
+
+    def _abort_activation(self, name, port, hf_was_on):
+        self.registry.release(name)
+        self._publish_port(port)
+        if hf_was_on:
+            self.request_hf_lock.emit(port, True)
+            self._log(f"{name}: activation failed; restoring HF (WS7 PID) lock on ch{port}.")
+
     def _deactivate(self, name, reason):
-        L = self._lasers[name]
         c = self._client(name)
+        port = self._port(name)
         err = ""
         try:
             if not c.connected:
@@ -508,10 +669,11 @@ class MatisseCDWorker(QObject):
         self._set_active(name, False)
         if err:
             self._log(f"WARNING: {name}: could not confirm CounterDrift OFF ({err}). "
-                      f"Check Matisse Commander before enabling the HF lock on ch{self._port(name)}.")
+                      f"Check Matisse Commander before enabling the HF lock on ch{port}.")
             self._publish(name, last_error=f"deactivate: {err}")
         else:
-            self._log(f"{name}: CounterDrift deactivated ({reason})")
+            self._log(f"{name}: CounterDrift deactivated ({reason}). ch{port} is now "
+                      f"UNLOCKED -- enable the HF lock if needed.")
             self._publish(name, last_error="")
 
     # ---- setpoint forwarding ---------------------------------------------
@@ -519,25 +681,36 @@ class MatisseCDWorker(QObject):
     def handle_setpoint_committed(self, port: int, f_thz: float):
         """WS7 course setpoint for `port` was written + read back. If a
         CounterDrift is active on that port, move its setpoint too."""
+        if f_thz < MIN_VALID_SETPOINT_THZ:
+            return
         for name, L in self._lasers.items():
-            if not (L["active"] and self._port(name) == port):
-                continue
-            if f_thz < MIN_VALID_SETPOINT_THZ:
-                return
-            nm_str = format_nm(thz_to_nm(f_thz), self.cfg["setpoint_decimals"],
-                               self.cfg["decimal_sep"])
-            try:
-                self._client(name).cd_setpoint_nm(nm_str)
-                L["runaway_since"] = None
-                self._log(f"{name}: CounterDrift setpoint -> {nm_str} nm ({f_thz:.7f} THz)")
-            except (MatisseError, OSError) as e:
-                self._log(f"ERROR: {name}: CounterDrift setpoint {nm_str} nm failed: {e}")
-                self._publish(name, last_error=f"setpoint: {e}")
+            if L["active"] and self._port(name) == port:
+                L["pending_sp"] = float(f_thz)
+                self._deliver_setpoint(name)
 
-    # ---- 1 Hz poll: reconnect, wavelength readback, runaway watchdog -----
+    def _deliver_setpoint(self, name):
+        L = self._lasers[name]
+        f_thz = L["pending_sp"]
+        nm_str = self._nm_str(f_thz)
+        try:
+            self._client(name).cd_setpoint_nm(nm_str)
+        except (MatisseError, OSError) as e:
+            self._log(f"ERROR: {name}: CounterDrift setpoint {nm_str} nm NOT delivered "
+                      f"({e}); retrying every poll.")
+            self._publish(name, last_error=f"setpoint not delivered: {e}")
+            return
+        if L["pending_sp"] == f_thz:
+            L["pending_sp"] = None
+        L["runaway_since"] = None
+        self._log(f"{name}: CounterDrift setpoint -> {nm_str} nm ({f_thz:.7f} THz)")
+        self._publish(name, last_error="")
+
+    # ---- 1 Hz poll: reconnect, pending setpoint, wavelength readback, watchdog --
     def _poll(self):
         now = time.monotonic()
         for name, L in self._lasers.items():
+            if self._stopping.is_set():
+                return
             c = self._client(name)
             if not c.connected:
                 if L["want_connected"] and now >= L["next_connect_t"]:
@@ -545,8 +718,10 @@ class MatisseCDWorker(QObject):
                 if not c.connected:
                     self._publish(name)
                     continue
+            if L["active"] and L["pending_sp"] is not None:
+                self._deliver_setpoint(name)
             port = self._port(name)
-            lam = mism = None
+            mism = None
             try:
                 lam = c.get_wavelength_nm()
                 f_hf = self._hf_freq_thz(port) if port in range(1, 9) else None
@@ -581,6 +756,55 @@ class MatisseCDWorker(QObject):
                       f">{self.cfg['runaway_s']} s -- deactivating CounterDrift "
                       f"(mode hop, actuator at rail, or setpoint misparsed?)")
             self._deactivate(name, reason="runaway watchdog")
+
+
+# ---------------------------------------------------------------------------
+# One worker + QThread per laser, so a hung Matisse Commander only stalls itself
+# ---------------------------------------------------------------------------
+
+class MatisseCDGroup:
+    def __init__(self, shared_state, cfg: dict, client_factory=MatisseCommanderClient,
+                 save_fn=save_config, log_fn=None):
+        self.cfg = cfg
+        self.registry = CDRegistry(cfg, save_fn)
+        self.workers, self.threads = [], []
+        for name in cfg["lasers"]:
+            w = MatisseCDWorker(shared_state, cfg, client_factory=client_factory,
+                                names=[name], registry=self.registry)
+            th = QtCore.QThread()
+            w.moveToThread(th)
+            th.started.connect(w.start)
+            # DIRECT: quit() is thread-safe; a queued quit would wait for the GUI
+            # thread, which is blocked in stop()'s wait() -> threads never finish.
+            w.finished.connect(th.quit, QtCore.Qt.DirectConnection)
+            if log_fn is not None:
+                w.log_message.connect(log_fn)
+            self.workers.append(w)
+            self.threads.append(th)
+
+    def start(self):
+        for th in self.threads:
+            th.start()
+
+    def get_snapshot(self) -> dict:
+        snap = {}
+        for w in self.workers:
+            snap.update(w.get_snapshot())
+        return snap
+
+    def stop(self, timeout_s: float = 3.0) -> bool:
+        """Graceful stop; if a worker is stuck in socket I/O, abort its socket
+        and wait again. Returns True when every thread has finished."""
+        for w in self.workers:
+            QtCore.QMetaObject.invokeMethod(w, "stop", QtCore.Qt.QueuedConnection)
+        ok = True
+        for w, th in zip(self.workers, self.threads):
+            if not th.wait(int(timeout_s * 1000)):
+                w.abort_io()
+                if not th.wait(int(timeout_s * 1000)):
+                    ok = False
+                    print("[MATISSE] WARNING: CounterDrift worker thread did not stop.")
+        return ok
 
 
 # ---------------------------------------------------------------------------
@@ -655,6 +879,8 @@ class MatisseCDPanel(QtWidgets.QGroupBox):
                                    f"HF minus MC in MHz. Setpoints are sent to CounterDrift as nm.")
             if mism is not None:
                 wl_txt += f"  (HF-MC {mism:+.0f} MHz)"
+            if s.get("setpoint_pending"):
+                wl_txt += "  <b style='color:#c0392b'>SP NOT DELIVERED (retrying)</b>"
             if err:
                 wl_txt += f"  <span style='color:#c0392b'>{err[:80]}</span>"
             w["wl"].setText(wl_txt)
@@ -676,20 +902,22 @@ class MatisseCDPanel(QtWidgets.QGroupBox):
 # Wiring into HF_Locking (called by main_wlm.py; pinned by tests)
 # ---------------------------------------------------------------------------
 
-def wire_into_hf(worker_wlm, worker_cd, panel=None):
-    """Connect MatisseCDWorker to WavemeterWorker (and the GUI panel).
+def wire_into_hf(worker_wlm, cd, panel=None):
+    """Connect CounterDrift worker(s) to WavemeterWorker (and the GUI panel).
+    `cd` is a MatisseCDGroup or a single MatisseCDWorker.
 
-    Every connection is QUEUED: the three objects live on different threads
-    in production, and queued delivery is what keeps DLL calls on the WLM
-    worker thread and Matisse sockets on the CD thread.
+    Every connection is QUEUED: the objects live on different threads in
+    production, and queued delivery is what keeps DLL calls on the WLM
+    worker thread and each Matisse socket on its laser's thread.
     """
     q = QtCore.Qt.QueuedConnection
-    worker_wlm.setpoint_committed.connect(worker_cd.handle_setpoint_committed, q)
-    worker_cd.request_hf_lock.connect(worker_wlm.handle_lock_toggle, q)
-    if panel is not None:
-        panel.request_channel.connect(worker_cd.handle_set_channel, q)
-        panel.request_connect.connect(worker_cd.handle_connect, q)
-        panel.request_activate.connect(worker_cd.handle_activate, q)
+    for w in getattr(cd, "workers", [cd]):
+        worker_wlm.setpoint_committed.connect(w.handle_setpoint_committed, q)
+        w.request_hf_lock.connect(worker_wlm.handle_lock_toggle, q)
+        if panel is not None:
+            panel.request_channel.connect(w.handle_set_channel, q)
+            panel.request_connect.connect(w.handle_connect, q)
+            panel.request_activate.connect(w.handle_activate, q)
 
 
 # ---------------------------------------------------------------------------
