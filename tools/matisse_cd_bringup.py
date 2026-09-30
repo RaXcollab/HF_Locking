@@ -20,8 +20,9 @@ Lab state required for B/C (printed again before any write):
   - In HF_Locking's Matisse panel: CD NOT active and "Connect" UNTICKED for this
     laser (this tool opens its own Matisse Commander connection)
 GUARDS: every step clamped to --max-step-mhz; if the laser is more than
---abort-mhz (+ the current step) from target for --abort-grace-s, or the HF
-signal is missing for --no-signal-s, the run aborts. CounterDrift is switched
+--abort-mhz (+ the current step) from target for --abort-grace-s, the HF
+reading is FROZEN (identical) for --frozen-s, or missing for --no-signal-s,
+the run aborts. CounterDrift is switched
 OFF in a finally block on every exit path -- the laser is then UNLOCKED.
 """
 import argparse
@@ -78,14 +79,19 @@ class BringUpAbort(RuntimeError):
 
 class BringUp:
     def __init__(self, client, read_freq, clock=time.monotonic, sleep=time.sleep, log=print,
-                 decimals=8, decimal_sep=".", abort_mhz=1000.0, abort_grace_s=2.0,
-                 no_signal_s=5.0, max_step_mhz=1000.0, tol_mhz=1.0, n_consec=5,
+                 decimals=8, decimal_sep=".", abort_mhz=300.0, abort_grace_s=1.0,
+                 no_signal_s=5.0, frozen_s=3.0, max_step_mhz=1000.0, tol_mhz=1.0, n_consec=5,
                  settle_timeout_s=60.0, hold_s=10.0, sample_dt_s=0.1, max_mismatch_mhz=500.0):
         self.client = client
         self.read_freq = read_freq
         self._clock, self._sleep, self._log = clock, sleep, log
         self.decimals, self.decimal_sep = decimals, decimal_sep
         self.abort_mhz, self.abort_grace_s, self.no_signal_s = abort_mhz, abort_grace_s, no_signal_s
+        # HF_Locking's PUB repeats the LAST GOOD value when the WS7 loses the line
+        # (workers._normalize_frequency), so "no signal" usually looks like a
+        # frozen number, not a missing one. Real readings jitter.
+        self.frozen_s = frozen_s
+        self._last_f, self._last_change_t, self._frozen = None, None, False
         self.max_step_mhz, self.tol_mhz, self.n_consec = max_step_mhz, tol_mhz, n_consec
         self.settle_timeout_s, self.hold_s, self.sample_dt_s = settle_timeout_s, hold_s, sample_dt_s
         self.max_mismatch_mhz = max_mismatch_mhz
@@ -96,7 +102,15 @@ class BringUp:
     # ---- primitives ----
     def _valid_freq(self):
         f = self.read_freq()
-        return f if (f is not None and f > 1.0) else None
+        if f is None or f <= 1.0:
+            return None
+        now = self._clock()
+        if f != self._last_f or self._last_change_t is None:
+            self._last_f, self._last_change_t, self._frozen = f, now, False
+        elif now - self._last_change_t > self.frozen_s:
+            self._frozen = True
+            return None
+        return f
 
     def _wait_freq(self):
         t0 = self._clock()
@@ -122,6 +136,11 @@ class BringUp:
         while self._clock() - t0 < duration_s:
             t = self._clock()
             f = self._valid_freq()
+            if self._frozen:
+                raise BringUpAbort(
+                    f"HF reading frozen for > {self.frozen_s} s -- WS7 lost the line (HF_Locking "
+                    f"repeats the last good value): laser probably ran away. Check the "
+                    f"decimal separator (now '{self.decimal_sep}') and the laser.")
             if f is None:
                 if t - last_valid > self.no_signal_s:
                     raise BringUpAbort(f"no HF signal for > {self.no_signal_s} s")
@@ -162,7 +181,20 @@ class BringUp:
             self._log(f"  !! could not confirm CounterDrift OFF ({e}) -- CHECK MATISSE COMMANDER")
 
     # ---- phases ----
-    def phase_a(self):
+    def _probe_unchanged(self, probe_s):
+        """Longest time a normal HF reading stays identical (WS7 switching
+        cycle + InfNothingChanged repeats). --frozen-s must sit well above it."""
+        t0 = self._clock()
+        last_f, last_t, longest = None, t0, 0.0
+        while self._clock() - t0 < probe_s:
+            f, t = self.read_freq(), self._clock()
+            if f is not None and f != last_f:
+                longest = max(longest, t - last_t) if last_f is not None else longest
+                last_f, last_t = f, t
+            self._sleep(self.sample_dt_s)
+        return max(longest, self._clock() - last_t)
+
+    def phase_a(self, probe_s=0.0):
         lam = self.client.get_wavelength_nm()
         f = self._wait_freq()
         r = classify_convention(f, lam, tol_mhz=self.max_mismatch_mhz)
@@ -170,6 +202,12 @@ class BringUp:
         self._log(f"A: MC {lam:.6f} nm | HF {f:.7f} THz = {thz_to_nm(f):.6f} nm (vac) | "
                   f"vac mismatch {r['mism_vac_mhz']:+.0f} MHz, air {r['mism_air_mhz']:+.0f} MHz "
                   f"-> {r['verdict'].upper()}")
+        if probe_s > 0:
+            mu = self._probe_unchanged(probe_s)
+            r.update(max_unchanged_s=mu, frozen_s_ok=mu < self.frozen_s / 2)
+            self._log(f"A: longest identical HF reading {mu:.2f} s over {probe_s:.0f} s; "
+                      f"--frozen-s {self.frozen_s} "
+                      f"{'OK' if r['frozen_s_ok'] else 'TOO SMALL -- raise it to > 2x this'}")
         return r
 
     def _precheck(self, steps_mhz):
@@ -307,8 +345,13 @@ def main(argv=None):
     ap.add_argument("--step-mhz", type=float, default=20.0)
     ap.add_argument("--steps", type=float, nargs="+", default=[20.0, 100.0, 500.0])
     ap.add_argument("--max-step-mhz", type=float, default=1000.0)
-    ap.add_argument("--abort-mhz", type=float, default=1000.0)
-    ap.add_argument("--abort-grace-s", type=float, default=2.0)
+    ap.add_argument("--abort-mhz", type=float, default=300.0,
+                    help="abort if |f - target| > this + current step ...")
+    ap.add_argument("--abort-grace-s", type=float, default=1.0, help="... for this long")
+    ap.add_argument("--no-signal-s", type=float, default=5.0)
+    ap.add_argument("--frozen-s", type=float, default=3.0,
+                    help="identical HF readings for this long = signal lost (check in phase A "
+                         "that normal readings change faster than this)")
     ap.add_argument("--tol-mhz", type=float, default=1.0)
     ap.add_argument("--hold-s", type=float, default=30.0)
     ap.add_argument("--settle-timeout-s", type=float, default=60.0)
@@ -332,14 +375,15 @@ def main(argv=None):
     client = MatisseCommanderClient(host, port, open_timeout_s=cfg.get("open_timeout_s", 120.0))
     reader = PubFreqReader(a.pub, wlm_port)
     b = BringUp(client, reader.read, decimal_sep=sep, abort_mhz=a.abort_mhz,
-                abort_grace_s=a.abort_grace_s, max_step_mhz=a.max_step_mhz, tol_mhz=a.tol_mhz,
+                abort_grace_s=a.abort_grace_s, no_signal_s=a.no_signal_s, frozen_s=a.frozen_s,
+                max_step_mhz=a.max_step_mhz, tol_mhz=a.tol_mhz,
                 hold_s=a.hold_s, settle_timeout_s=a.settle_timeout_s)
     print(f"{a.laser}: Matisse Commander {host}:{port}, HF ch{wlm_port} via {a.pub}, "
           f"decimal_sep '{sep}'")
     try:
         client.connect()
         if a.phase == "A":
-            r = b.phase_a()
+            r = b.phase_a(probe_s=5.0)
         elif a.phase == "B":
             r = b.phase_b(a.step_mhz)
         else:

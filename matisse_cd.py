@@ -154,17 +154,20 @@ class MatisseError(RuntimeError):
     """Matisse Commander answered, but with an error reply."""
 
 
-# Error reply shapes: "Error: ..." (MC), 'N,"msg"' with N != 0 (laser DSP),
-# "!ERROR n", header-echoed ":CMD: Error: ...", "Err: ...".
+# Error reply shapes: "Error: ..." (MC), 'N,"msg"' with N != 0 (laser DSP, also
+# after a header echo ":CMD: N,\"..\""), "!ERROR n", ":CMD: Error: ...", "Err: ...".
+# Success texts that merely mention errors ("No error", '0,"no error"') pass.
 _ERR_WORD = re.compile(r"\berr(or)?\b", re.IGNORECASE)
-_DSP_CODE = re.compile(r'^\s*(-?\d+)\s*,\s*"')
+_NO_ERROR = re.compile(r"\bno\s+errors?\b", re.IGNORECASE)
+_DSP_CODE = re.compile(r'(?:^|:)\s*(-?\d+)\s*,\s*"')
 
 
 def _is_error_reply(reply: str) -> bool:
-    m = _DSP_CODE.match(reply)
+    r = reply.strip()
+    m = _DSP_CODE.search(r)
     if m:
         return int(m.group(1)) != 0
-    return bool(_ERR_WORD.search(reply)) or reply.lstrip().startswith("!")
+    return bool(_ERR_WORD.search(_NO_ERROR.sub("", r))) or r.startswith("!")
 
 
 class MatisseCommanderClient:
@@ -189,14 +192,23 @@ class MatisseCommanderClient:
         self.command_timeout_s = float(command_timeout_s)
         self.open_timeout_s = float(open_timeout_s)
         self.sock = None
+        self._aborted = False     # set by abort(); terminal (app is shutting down)
 
     @property
     def connected(self) -> bool:
         return self.sock is not None
 
     def connect(self) -> None:
+        if self._aborted:
+            raise ConnectionAbortedError("client aborted (shutting down)")
         self.close(graceful=False)
         s = socket.create_connection((self.host, self.port), timeout=self.connect_timeout_s)
+        # Publish the socket BEFORE the drain so abort() can shut it down; then
+        # re-check the flag (covers abort() having run just before this line).
+        self.sock = s
+        if self._aborted:
+            self.close(graceful=False)
+            raise ConnectionAbortedError("client aborted (shutting down)")
         # Drain any banner MC emits on connect (as the collaborator's client does);
         # otherwise every later reply would be read one frame late.
         s.settimeout(0.3)
@@ -205,8 +217,10 @@ class MatisseCommanderClient:
                 pass
         except socket.timeout:
             pass
+        except OSError:
+            self.close(graceful=False)
+            raise
         s.settimeout(self.command_timeout_s)
-        self.sock = s
 
     def close(self, graceful: bool = True) -> None:
         if self.sock is None:
@@ -226,6 +240,7 @@ class MatisseCommanderClient:
         self.sock = None
 
     def abort(self) -> None:
+        self._aborted = True
         s = self.sock
         if s is not None:
             try:
@@ -258,9 +273,13 @@ class MatisseCommanderClient:
 
     def ask(self, cmd: str, timeout_s: float = None, retry: bool = True) -> str:
         for attempt in (0, 1):
+            if self._aborted:
+                raise ConnectionAbortedError("client aborted (shutting down)")
             try:
                 if self.sock is None:
                     self.connect()
+                if self._aborted:
+                    raise ConnectionAbortedError("client aborted (shutting down)")
                 self.sock.settimeout(timeout_s or self.command_timeout_s)
                 try:
                     self._send(cmd)
@@ -296,10 +315,12 @@ class MatisseCommanderClient:
 
     def get_wavelength_nm(self) -> float:
         reply = self.mcp("MCP_WM_GET_WAVELENGTH", retry=False)
-        try:
-            return float(reply.split()[-1 if reply.startswith(":") else 0].replace(",", "."))
-        except (IndexError, ValueError):
-            raise MatisseError(f"unparseable wavelength reply {reply!r}")
+        for tok in reply.split():        # first numeric token (skips a ":CMD:" echo)
+            try:
+                return float(tok.replace(",", "."))
+            except ValueError:
+                continue
+        raise MatisseError(f"unparseable wavelength reply {reply!r}")
 
 
 # ---------------------------------------------------------------------------
@@ -394,6 +415,7 @@ class MatisseCDWorker(QObject):
                 "restored": active,
                 "runaway_since": None,
                 "pending_sp": None,     # THz not yet delivered to CounterDrift
+                "off_unconfirmed": False,   # OFF sent but not confirmed: port stays claimed
             }
             if active and self._port(name) in range(1, 9):
                 self.registry.claim(name, self._port(name))
@@ -430,6 +452,7 @@ class MatisseCDWorker(QObject):
             s["restored"] = L["restored"]
             s["want_connected"] = L["want_connected"]
             s["setpoint_pending"] = L["pending_sp"] is not None
+            s["off_unconfirmed"] = L["off_unconfirmed"]
         self._publish_port(port)
 
     def get_snapshot(self) -> dict:
@@ -488,6 +511,7 @@ class MatisseCDWorker(QObject):
         L["active"] = bool(active)
         L["restored"] = False
         L["runaway_since"] = None
+        L["off_unconfirmed"] = False
         if not active:
             L["pending_sp"] = None
             self.registry.release(name)
@@ -618,19 +642,24 @@ class MatisseCDWorker(QObject):
             self._log(f"{name}: HF (WS7 PID) lock on ch{port} switched OFF for CounterDrift")
 
         nm_str = self._nm_str(sp)
+        activate_sent = False
         try:
             if not L["cd_opened"]:
                 c.cd_open()
                 L["cd_opened"] = True
             c.cd_setpoint_nm(nm_str)
+            activate_sent = True
             c.cd_activate(True)
         except (MatisseError, OSError) as e:
-            try:
-                c.cd_activate(False)
-            except Exception:
-                pass
-            self._abort_activation(name, port, hf_was_on)
-            return False, f"Matisse Commander command failed: {e}"
+            # "Activate true" may have executed although its reply failed: only
+            # give the port back (and restore the HF lock) once OFF is confirmed.
+            if not activate_sent or self._confirm_off(name):
+                self._abort_activation(name, port, hf_was_on)
+                return False, f"Matisse Commander command failed: {e}"
+            self._mark_off_unconfirmed(name)
+            return False, (f"Matisse Commander command failed ({e}) and CounterDrift OFF "
+                           f"could not be confirmed -- ch{port} stays claimed, HF lock stays "
+                           f"OFF; retrying OFF every poll.")
 
         self._set_active(name, True)
         L["pending_sp"] = None
@@ -656,25 +685,39 @@ class MatisseCDWorker(QObject):
             self.request_hf_lock.emit(port, True)
             self._log(f"{name}: activation failed; restoring HF (WS7 PID) lock on ch{port}.")
 
-    def _deactivate(self, name, reason):
-        c = self._client(name)
-        port = self._port(name)
-        err = ""
+    def _confirm_off(self, name) -> bool:
+        """Send Activate false. True when CounterDrift is known OFF: MC acked,
+        or MC is not running (connection refused -> its plugin cannot run)."""
         try:
-            if not c.connected:
-                self._try_connect(name)
-            c.cd_activate(False)
+            self._client(name).cd_activate(False)
+            return True
+        except ConnectionRefusedError:
+            return True
         except (MatisseError, OSError) as e:
-            err = str(e)
+            self._last_off_error = str(e)
+            return False
+
+    def _mark_off_unconfirmed(self, name):
+        L = self._lasers[name]
+        L["active"] = False               # stop forwarding + watchdog ...
+        L["off_unconfirmed"] = True       # ... but keep the port claimed
+        L["pending_sp"] = None
+        self.registry.set(name, active=True)   # still blocks the HF lock after a restart
+        err = getattr(self, "_last_off_error", "")
+        self._log(f"WARNING: {name}: CounterDrift OFF NOT confirmed ({err}). ch{self._port(name)} "
+                  f"stays claimed (HF lock blocked); retrying OFF every poll. Closing Matisse "
+                  f"Commander also counts as OFF.")
+        self._publish(name, last_error=f"OFF unconfirmed: {err}")
+
+    def _deactivate(self, name, reason):
+        port = self._port(name)
+        if not self._confirm_off(name):
+            self._mark_off_unconfirmed(name)
+            return
         self._set_active(name, False)
-        if err:
-            self._log(f"WARNING: {name}: could not confirm CounterDrift OFF ({err}). "
-                      f"Check Matisse Commander before enabling the HF lock on ch{port}.")
-            self._publish(name, last_error=f"deactivate: {err}")
-        else:
-            self._log(f"{name}: CounterDrift deactivated ({reason}). ch{port} is now "
-                      f"UNLOCKED -- enable the HF lock if needed.")
-            self._publish(name, last_error="")
+        self._log(f"{name}: CounterDrift deactivated ({reason}). ch{port} is now "
+                  f"UNLOCKED -- enable the HF lock if needed.")
+        self._publish(name, last_error="")
 
     # ---- setpoint forwarding ---------------------------------------------
     @pyqtSlot(int, float)
@@ -711,6 +754,11 @@ class MatisseCDWorker(QObject):
         for name, L in self._lasers.items():
             if self._stopping.is_set():
                 return
+            if L["off_unconfirmed"] and L["want_connected"]:
+                if self._confirm_off(name):
+                    self._set_active(name, False)
+                    self._log(f"{name}: CounterDrift OFF confirmed; ch{self._port(name)} released.")
+                    self._publish(name, last_error="")
             c = self._client(name)
             if not c.connected:
                 if L["want_connected"] and now >= L["next_connect_t"]:
@@ -885,11 +933,14 @@ class MatisseCDPanel(QtWidgets.QGroupBox):
                 wl_txt += f"  <span style='color:#c0392b'>{err[:80]}</span>"
             w["wl"].setText(wl_txt)
 
-            act = bool(s.get("active", False))
+            unconf = bool(s.get("off_unconfirmed", False))
+            act = bool(s.get("active", False)) or unconf   # checked -> a click retries OFF
             btn = w["act"]
             btn.blockSignals(True)
             btn.setChecked(act)
-            if act and s.get("restored"):
+            if unconf:
+                btn.setText("CD OFF? UNCONFIRMED")
+            elif act and s.get("restored"):
                 btn.setText("CD ACTIVE? (restored)")
             else:
                 btn.setText("CD ACTIVE" if act else "Activate CD")

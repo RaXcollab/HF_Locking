@@ -105,7 +105,14 @@ turns the whole feature off. Front end is THz everywhere; nm only on the MC wire
   wavelength poll and plugin open (`open_timeout_s`=120) never retry.
 - Fight state (CD active AND WS7 lock on): channel button turns orange and stays
   clickable to switch the HF lock OFF.
-- Adversarial review 2026-09-29: findings pinned in `tests/test_matisse_review_fixes.py`.
+- **OFF must be confirmed:** if `Activate false` is not acked (MC hung), the port
+  stays claimed (`off_unconfirmed`, HF lock blocked / not restored, panel "CD OFF?
+  UNCONFIRMED") and OFF is retried each poll; connection refused (MC not running)
+  counts as OFF. A client `abort()` (shutdown) is terminal: no reconnect/retry.
+- Watchdog cannot act while MC is unreachable (it could not deactivate anyway).
+- Adversarial reviews: 2026-09-29 (Opus) -> `tests/test_matisse_review_fixes.py`;
+  2026-09-30 (Fable, b98c91d..20b1a78) -> `tests/test_matisse_review2_fixes.py` + F1
+  in `tests/test_matisse_cd_bringup.py`.
 - Closing HF_Locking leaves CD running in MC; the flag is persisted and blocks
   the HF lock on next start until the user Deactivates.
 - Tests: `tests/test_matisse_cd.py` (module, fake MC TCP server),
@@ -118,12 +125,17 @@ turns the whole feature off. Front end is THz everywhere; nm only on the MC wire
   the decimal separator), C `--go` (settle times per step -> tune `runaway_s`,
   `LOCK_TIMEOUT_S`; hold std). Runaway/no-signal guards; CD always switched OFF at
   exit. Logic pinned against a simulated laser in `tests/test_matisse_cd_bringup.py`.
+  NOTE: HF_Locking's PUB repeats the LAST GOOD value when the WS7 loses the line,
+  so the tool treats an identical reading for `--frozen-s` (3 s) as signal lost;
+  phase A measures the longest normal identical-reading run to validate that.
 - Wire: LabVIEW length-prefixed framing + `#SERVER ` prefix (from a
   collaborator's `matisse_cd_controller.py`). Probe: `python matisse_cd.py --probe host port`.
 - **UNVERIFIED on our hardware:** CD setpoint is vacuum nm; LabVIEW decimal
   separator (`decimal_sep`); `MCP_WM_GET_WAVELENGTH` returns nm per collaborator
   (air/vac unstated; behavior with plugin closed unknown); TiSa-2 MC
-  server port (default 30001); CD loop bandwidth/capture range vs analog PID.
+  server port (default 30001); CD loop bandwidth/capture range vs analog PID;
+  whether MC ever replies with "error" wording on success; `socket.shutdown`
+  unblocking a recv in another thread on Windows (verified on Linux only).
 
 ### ZMQ Protocol
 
